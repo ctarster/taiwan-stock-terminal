@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>量化決策終端 PRO</title>
+    <!-- 引入核心資源 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body { background-color: #000; margin: 0; padding: 0; color: #d1d5db; overflow: hidden; height: 100vh; }
+        #root { height: 100%; width: 100%; }
+        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #000; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
+        * { scrollbar-width: thin; scrollbar-color: #333 #000; }
+        :-webkit-full-screen { background-color: #000; }
+        .glass-panel { background: rgba(10, 10, 10, 0.98); backdrop-filter: blur(20px); border: 1px solid #333; }
+        .terminal-border { border: 1px solid #1f2937; }
+        .loading-shimmer { background: linear-gradient(90deg, #050505 25%, #111 50%, #050505 75%); background-size: 200% 100%; animation: shimmer 2s infinite linear; }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback, useRef } = React;
+
+        const API_VERSION = "v1beta"; 
+
+        const Indicators = {
+            ema: (data, period) => {
+                if (!data || data.length === 0) return [];
+                const k = 2 / (period + 1);
+                let emaVal = data[0];
+                return data.map(val => (emaVal = (val - emaVal) * k + emaVal));
+            },
+            calculateMACD: (closePrices) => {
+                if (!closePrices || closePrices.length < 26) return { dif: [], dea: [], macd: [] };
+                const ema12 = Indicators.ema(closePrices, 12);
+                const ema26 = Indicators.ema(closePrices, 26);
+                const dif = ema12.map((v, i) => v - ema26[i]);
+                const dea = Indicators.ema(dif, 9);
+                const macd = dif.map((v, i) => (v - dea[i]) * 2);
+                return { dif, dea, macd };
+            },
+            calculateKDJ: (history) => {
+                if (!history || history.length === 0) return { k: [], d: [], j: [] };
+                const period = 9;
+                const ks = [], ds = [], js = [];
+                let k = 50, d = 50;
+                for (let i = 0; i < history.length; i++) {
+                    const start = Math.max(0, i - period + 1);
+                    const slice = history.slice(start, i + 1);
+                    const low = Math.min(...slice.map(data => data.low));
+                    const high = Math.max(...slice.map(data => data.high));
+                    const rsv = high === low ? 0 : ((history[i].close - low) / (high - low)) * 100;
+                    k = (2 / 3) * k + (1 / 3) * rsv;
+                    d = (2 / 3) * d + (1 / 3) * k;
+                    js.push(3 * k - 2 * d);
+                    ks.push(k);
+                    ds.push(d);
+                }
+                return { k: ks, d: ds, j: js };
+            }
+        };
+
+        const aggregateWeekly = (dailyData) => {
+            const weekly = [];
+            if (!dailyData || dailyData.length === 0) return weekly;
+
+            const getWeek = (dateString) => {
+                const d = new Date(dateString);
+                d.setHours(0, 0, 0, 0);
+                d.setDate(d.getDate() + 4 - (d.getDay() || 7));
+                const yearStart = new Date(d.getFullYear(), 0, 1);
+                const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+                return `${d.getFullYear()}-W${weekNo.toString().padStart(2, '0')}`;
+            };
+
+            let currentWeek = null;
+            let weekCandle = null;
+
+            dailyData.forEach(day => {
+                const weekKey = getWeek(day.time);
+                if (weekKey !== currentWeek) {
+                    if (weekCandle) weekly.push(weekCandle);
+                    currentWeek = weekKey;
+                    weekCandle = { ...day };
+                } else {
+                    weekCandle.high = Math.max(weekCandle.high, day.high);
+                    weekCandle.low = Math.min(weekCandle.low, day.low);
+                    weekCandle.close = day.close;
+                    weekCandle.volume += day.volume;
+                }
+            });
+            if (weekCandle) weekly.push(weekCandle);
+            return weekly;
+        };
+
+        const getMockData = (symbol, price) => ({
+            name: `${symbol} (離線測試)`,
+            price: String(price),
+            change: "+0.00",
+            percent: "+0.00%",
+            industry: "系統測試模組",
+            market: { taiex: "測試數據", sox: "測試數據", nasdaq: "測試數據" },
+            peers: [{ name: "模擬對手A", change: "+1.2%" }, { name: "模擬對手B", change: "-0.5%" }],
+            valuation: { yield: "---", pb: "---", rating: "測試評估" },
+            fund: { eps: "---", gross: "---", net: "---", status: "由於 API 額度耗盡或網路異常，目前啟動「離線測試模式」。圖表為真實台股報價，但此處文字分析皆為系統虛擬生成，僅供測試介面排版使用。" },
+            chips: { foreign: "模擬", trust: "模擬", big: "模擬", retail: "模擬", status: "籌碼資料模擬中。請等待 API 額度恢復後再重新整理取得真實數據。" },
+            tech: { ma: "均線模擬", support: "---", pressure: "---" },
+            strategy: { score: 88, conclusion: "離線運行中", short: "測試狀態", swing: "模擬策略", stop: "---" },
+            news: [
+                { date: "剛剛", title: `【模擬情報】Apple iPhone 16 Pro 發表會落幕，市場關注 ${symbol} 相關硬體供應鏈動向。`, impact: "多" },
+                { date: "今日", title: `【模擬情報】NVIDIA RTX 5090 高階顯示卡傳言包下大量產能，引發關注。`, impact: "多" }
+            ]
+        });
+
+        const App = () => {
+            const [stockId, setStockId] = useState('2330');
+            const [inputValue, setInputValue] = useState('');
+            const [customKey, setCustomKey] = useState(() => (localStorage.getItem('groq_api_key') || '').trim());
+            const [aiModel, setAiModel] = useState(() => (localStorage.getItem('groq_model_name') || 'llama-3.3-70b-versatile').trim());
+            
+            const [loading, setLoading] = useState(false);
+            const [aiLoading, setAiLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [chartData, setChartData] = useState([]); 
+            const [timeframe, setTimeframe] = useState('1D'); 
+            const [aiData, setAiData] = useState(null);
+            const [isFullScreen, setIsFullScreen] = useState(false);
+            const [zenMode, setZenMode] = useState(false);
+            const [showSettings, setShowSettings] = useState(false);
+
+            const rootRef = useRef(null);
+            const containerRefs = { kline: useRef(null), vol: useRef(null), macd: useRef(null), kdj: useRef(null) };
+            const chartRefs = useRef({});
+            const seriesRefs = useRef({});
+            const isChartInitialized = useRef(false);
+            const isSyncing = useRef(false);
+            
+            const aiCache = useRef({});
+            const isFetchingRef = useRef(false);
+
+            const fetchWithTimeout = async (url, options = {}, timeout = 30000) => {
+                const controller = new AbortController();
+                const id = setTimeout(() => controller.abort(), timeout);
+                try {
+                    const response = await fetch(url, { ...options, signal: controller.signal });
+                    clearTimeout(id);
+                    return response;
+                } catch (e) {
+                    clearTimeout(id);
+                    if (e.name === 'AbortError') throw new Error("連線逾時");
+                    throw e;
+                }
+            };
+
+            const fetchWithRetry = async (url, options = {}, max = 2) => {
+                let lastErr = null;
+                for (let i = 0; i < max; i++) {
+                    try {
+                        const res = await fetchWithTimeout(url, options, 30000);
+                        if (res.ok) return res;
+                        
+                        if (res.status === 400) {
+                            const errBody = await res.json().catch(() => ({}));
+                            const detailedMsg = errBody.error?.message || "請確認模型名稱或 API 格式";
+                            throw new Error(`設定格式錯誤(400): ${detailedMsg}`);
+                        }
+
+                        if (res.status === 401 || res.status === 403) throw new Error("驗證失敗，請確認 Groq 金鑰是否有效 (通常為 gsk_ 開頭)");
+                        if (res.status === 404) throw new Error("模型端點無法存取，請確認模型名稱");
+                        
+                        if (res.status === 429) {
+                            throw new Error("RATE_LIMIT");
+                        }
+
+                        if (res.status >= 500) {
+                            if (i < max - 1) {
+                                await new Promise(r => setTimeout(r, 2000));
+                                continue;
+                            }
+                            throw new Error("SERVER_BUSY");
+                        }
+
+                        throw new Error(`伺服器回應異常(${res.status})`);
+                    } catch (e) { 
+                        lastErr = e; 
+                        if (e.message && (e.message.includes("400") || e.message.includes("401") || e.message.includes("403") || e.message.includes("404") || e.message.includes("RATE_LIMIT") || e.message.includes("SERVER_BUSY"))) {
+                            throw e; 
+                        }
+                    }
+                }
+                throw lastErr || new Error("網路連線異常");
+            };
+
+            const handleSearch = useCallback(() => {
+                if (inputValue.trim() && !aiLoading && !isFetchingRef.current) {
+                    setStockId(inputValue.trim().toUpperCase());
+                }
+            }, [inputValue, aiLoading]);
+
+            const toggleFullScreen = () => {
+                if (!document.fullscreenElement) {
+                    rootRef.current.requestFullscreen().catch(() => setZenMode(true));
+                } else {
+                    document.exitFullscreen();
+                }
+            };
+
+            useEffect(() => {
+                const fn = () => { setIsFullScreen(!!document.fullscreenElement); if(!!document.fullscreenElement) setZenMode(false); };
+                document.addEventListener('fullscreenchange', fn);
+                return () => document.removeEventListener('fullscreenchange', fn);
+            }, []);
+
+            const initCharts = useCallback(() => {
+                if (!window.LightweightCharts || isChartInitialized.current || !containerRefs.kline.current) return;
+                const width = containerRefs.kline.current.clientWidth;
+                const baseOpts = {
+                    width, layout: { background: { color: '#000000' }, textColor: '#9ca3af', fontSize: 11 },
+                    grid: { vertLines: { color: '#111' }, horzLines: { color: '#111' } },
+                    rightPriceScale: { borderColor: '#374151' }, crosshair: { mode: 0 },
+                    handleScroll: true, handleScale: true
+                };
+                
+                const h = (isFullScreen || zenMode) ? 500 : 320;
+
+                const kChart = window.LightweightCharts.createChart(containerRefs.kline.current, { ...baseOpts, height: h, timeScale: { borderColor: '#374151', fixRightEdge: true, rightOffset: 5 } });
+                const kSeries = kChart.addCandlestickSeries({ upColor: '#ef4444', downColor: '#22c55e', borderVisible: false, wickUpColor: '#ef4444', wickDownColor: '#22c55e' });
+                const ma5Series = kChart.addLineSeries({ color: '#facc15', lineWidth: 1.5 });
+                const ma20Series = kChart.addLineSeries({ color: '#60a5fa', lineWidth: 1.5 });
+                const ma60Series = kChart.addLineSeries({ color: '#4ade80', lineWidth: 1.5 });
+                
+                const vChart = window.LightweightCharts.createChart(containerRefs.vol.current, { ...baseOpts, height: 70, timeScale: { visible: false, fixRightEdge: true } });
+                const vSeries = vChart.addHistogramSeries({ color: '#3b82f6', priceFormat: { type: 'volume' } });
+                
+                const mChart = window.LightweightCharts.createChart(containerRefs.macd.current, { ...baseOpts, height: 90, timeScale: { visible: false, fixRightEdge: true } });
+                const mDif = mChart.addLineSeries({ color: '#facc15', lineWidth: 1 });
+                const mDea = mChart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
+                const mHist = mChart.addHistogramSeries();
+                
+                const kjChart = window.LightweightCharts.createChart(containerRefs.kdj.current, { ...baseOpts, height: 90, timeScale: { borderColor: '#374151', fixRightEdge: true } });
+                const kjK = kjChart.addLineSeries({ color: '#f8fafc', lineWidth: 1 });
+                const kjD = kjChart.addLineSeries({ color: '#facc15', lineWidth: 1 });
+                const kjJ = kjChart.addLineSeries({ color: '#d946ef', lineWidth: 1 });
+
+                chartRefs.current = { kChart, vChart, mChart, kjChart };
+                seriesRefs.current = { kSeries, ma5Series, ma20Series, ma60Series, vSeries, macdDifSeries: mDif, macdDeaSeries: mDea, macdHistSeries: mHist, kdjKSeries: kjK, kdjDSeries: kjD, kdjJSeries: kjJ };
+
+                [kChart, vChart, mChart, kjChart].forEach(c => {
+                    c.timeScale().subscribeVisibleLogicalRangeChange(range => {
+                        if (!range || isSyncing.current) return;
+                        isSyncing.current = true;
+                        [kChart, vChart, mChart, kjChart].forEach(other => { if (other !== c) other.timeScale().setVisibleLogicalRange(range); });
+                        isSyncing.current = false;
+                    });
+                });
+                isChartInitialized.current = true;
+            }, [isFullScreen, zenMode]);
+
+            useEffect(() => {
+                if (isChartInitialized.current && chartRefs.current.kChart) {
+                    const isLarge = isFullScreen || zenMode;
+                    chartRefs.current.kChart.applyOptions({ height: isLarge ? 500 : 320 });
+                }
+            }, [isFullScreen, zenMode]);
+
+            useEffect(() => {
+                if (!containerRefs.kline.current) return;
+                const observer = new ResizeObserver(entries => {
+                for (let entry of entries) {
+                    const width = entry.contentRect.width;
+                    if (isChartInitialized.current && chartRefs.current) {
+                    Object.values(chartRefs.current).forEach(chart => {
+                        if (chart && typeof chart.applyOptions === 'function') chart.applyOptions({ width });
+                    });
+                    }
+                }
+                });
+                observer.observe(containerRefs.kline.current);
+                return () => observer.disconnect();
+            }, []);
+
+            const updateChartData = useCallback((historyArray) => {
+                if (!isChartInitialized.current || !historyArray || historyArray.length === 0) return;
+                const sorted = [...historyArray].sort((a, b) => new Date(a.time) - new Date(b.time));
+                const closePrices = sorted.map(d => d.close);
+                const ma5 = Indicators.ema(closePrices, 5);
+                const ma20 = Indicators.ema(closePrices, 20);
+                const ma60 = Indicators.ema(closePrices, 60);
+                const { dif, dea, macd } = Indicators.calculateMACD(closePrices);
+                const { k, d, j } = Indicators.calculateKDJ(sorted);
+                const s = seriesRefs.current;
+                if (!s.kSeries) return;
+
+                s.kSeries.setData(sorted);
+                s.ma5Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma5[i] })));
+                s.ma20Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma20[i] })));
+                s.ma60Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma60[i] })));
+                s.vSeries.setData(sorted.map(data => ({ time: data.time, value: data.volume, color: data.close >= data.open ? 'rgba(239, 68, 68, 0.6)' : 'rgba(34, 197, 94, 0.6)' })));
+                s.macdDifSeries.setData(sorted.map((d, i) => ({ time: d.time, value: dif[i] || 0 })));
+                s.macdDeaSeries.setData(sorted.map((d, i) => ({ time: d.time, value: dea[i] || 0 })));
+                s.macdHistSeries.setData(sorted.map((d, i) => ({ time: d.time, value: macd[i] || 0, color: macd[i] >= 0 ? '#ef4444' : '#22c55e' })));
+                s.kdjKSeries.setData(sorted.map((v, i) => ({ time: v.time, value: k[i] || 50 })));
+                s.kdjDSeries.setData(sorted.map((v, i) => ({ time: v.time, value: d[i] || 50 })));
+                s.kdjJSeries.setData(sorted.map((v, i) => ({ time: v.time, value: j[i] || 50 })));
+            }, []);
+
+            useEffect(() => {
+                if (chartData.length > 0) {
+                    if (!isChartInitialized.current) initCharts();
+                    const displayData = timeframe === '1W' ? aggregateWeekly(chartData) : chartData;
+                    updateChartData(displayData);
+                }
+            }, [timeframe, chartData, initCharts, updateChartData]);
+
+            const executeAnalysis = useCallback(async (target) => {
+                if (!target || isFetchingRef.current) return;
+                isFetchingRef.current = true;
+
+                setLoading(true); setAiLoading(true); setError(null); setAiData(null); setChartData([]);
+                
+                const d = new Date(); d.setFullYear(d.getFullYear()-1);
+                
+                let historyCache = null;
+                let lastClosePrice = "未知";
+                
+                await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`, {}, 15000)
+                    .then(res => res.ok ? res.json() : null)
+                    .then(hJson => {
+                        if (hJson && hJson.msg === 'success' && hJson.data?.length) {
+                            const formatted = hJson.data.map(i => ({ time: i.date, open: Number(i.open), high: Number(i.max), low: Number(i.min), close: Number(i.close), volume: Number(i.Trading_Volume) }));
+                            setChartData(formatted);
+                            historyCache = formatted;
+                            lastClosePrice = formatted[formatted.length-1].close.toString();
+                        }
+                    })
+                    .catch(() => { /* 忽略報價錯誤 */ });
+
+                const cleanKey = customKey ? customKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '') : "";
+                if (!cleanKey) {
+                    setAiLoading(false); setLoading(false);
+                    isFetchingRef.current = false;
+                    return; 
+                }
+
+                const nowMs = Date.now();
+                const cacheKey = `groq_cache_${target}`;
+                const savedCache = localStorage.getItem(cacheKey);
+                if (savedCache) {
+                    try {
+                        const parsedCache = JSON.parse(savedCache);
+                        if (nowMs - parsedCache.timestamp < 14400000) { 
+                            setAiData(parsedCache.data);
+                            
+                            if (historyCache) {
+                                const realP = parseFloat(String(parsedCache.data.price).replace(/,/g, ''));
+                                if (!isNaN(realP)) {
+                                    const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
+                                    const lastC = historyCache[historyCache.length-1];
+                                    if(lastC.time < todayStr) historyCache.push({ time: todayStr, open: realP, high: realP, low: realP, close: realP, volume: 0 });
+                                    else lastC.close = realP;
+                                    setChartData([...historyCache]);
+                                }
+                            }
+
+                            setAiLoading(false); setLoading(false);
+                            isFetchingRef.current = false;
+                            return; 
+                        }
+                    } catch (e) { /* 忽略解析錯誤 */ }
+                }
+
+                const safeModel = aiModel ? aiModel.replace(/[^a-z0-9.-]/gi, '') : "llama-3.3-70b-versatile";
+                
+                try {
+                    const prompt = `分析台股代號[${target}]。參考報價${lastClosePrice}。任務：報價、大盤/費半/那指狀態、競爭對手、估值評估、籌碼面(外資/投信/主力/散戶)與最新動態。
+                    規則：
+                    1. 絕對禁止使用任何表情符號。
+                    2. 若在新聞或點評中推薦或提及任何硬體商品時，務必清楚寫出具體的「品牌」與「型號」。
+                    3. 必須且只能回傳 JSON 格式。請直接輸出 JSON 大括號，不要包含 Markdown 標籤。
+                    JSON結構：{"name":"公司名","price":"現價","change":"漲跌","percent":"幅度","industry":"產業","market":{"taiex":"大盤","sox":"費半","nasdaq":"那指"},"peers":[{"name":"同業","change":"漲跌"}],"valuation":{"yield":"殖利率","pb":"股淨比","rating":"評價"},"fund":{"eps":"EPS","gross":"毛利","net":"淨利","status":"點評"},"chips":{"foreign":"外資","trust":"投信","big":"主力","retail":"散戶","status":"點評"},"tech":{"ma":"均線","support":"支撐","pressure":"壓力"},"strategy":{"score":85,"conclusion":"判定","short":"短線","swing":"策略","stop":"停損"},"news":[{"date":"日期","title":"標題","impact":"多空"}]}`;
+
+                    const apiUrl = `https://api.groq.com/openai/v1/chat/completions`;
+
+                    const aiRes = await fetchWithRetry(apiUrl, {
+                        method: 'POST', 
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${cleanKey}`
+                        },
+                        body: JSON.stringify({ 
+                            model: safeModel,
+                            temperature: 0.2,
+                            messages: [
+                                { role: "system", content: prompt },
+                                { role: "user", content: `請提供台股 [${target}] 的深度分析數據，直接輸出純 JSON。` }
+                            ]
+                        })
+                    }, 2);
+
+                    const aiJson = await aiRes.json();
+                    let rawText = aiJson.choices?.[0]?.message?.content;
+                    if (!rawText) throw new Error("AI 模型未能產出內容");
+                    
+                    rawText = rawText.replace(/```json/gi, '').replace(/```/gi, '').trim();
+
+                    const match = rawText.match(/\{[\s\S]*\}/);
+                    if (!match) throw new Error("資料格式無法解析");
+                    
+                    const rawP = JSON.parse(match[0]);
+                    
+                    // 【終極防護】：強制將所有 AI 回傳值轉型為字串或陣列，防止 React 崩潰黑屏
+                    const safeAiData = {
+                        name: String(rawP.name || target),
+                        price: String(rawP.price || lastClosePrice),
+                        change: String(rawP.change || "0"),
+                        percent: String(rawP.percent || "0%"),
+                        industry: String(rawP.industry || "-"),
+                        market: {
+                            taiex: String(rawP.market?.taiex || "-"),
+                            sox: String(rawP.market?.sox || "-"),
+                            nasdaq: String(rawP.market?.nasdaq || "-")
+                        },
+                        peers: Array.isArray(rawP.peers) ? rawP.peers.map(p => ({
+                            name: String(p?.name || "-"),
+                            change: String(p?.change || "0")
+                        })) : [],
+                        valuation: {
+                            yield: String(rawP.valuation?.yield || "-"),
+                            pb: String(rawP.valuation?.pb || "-"),
+                            rating: String(rawP.valuation?.rating || "-")
+                        },
+                        fund: {
+                            eps: String(rawP.fund?.eps || "-"),
+                            gross: String(rawP.fund?.gross || "-"),
+                            net: String(rawP.fund?.net || "-"),
+                            status: String(rawP.fund?.status || "-")
+                        },
+                        chips: {
+                            foreign: String(rawP.chips?.foreign || "-"),
+                            trust: String(rawP.chips?.trust || "-"),
+                            big: String(rawP.chips?.big || "-"),
+                            retail: String(rawP.chips?.retail || "-"),
+                            status: String(rawP.chips?.status || "-")
+                        },
+                        tech: {
+                            ma: String(rawP.tech?.ma || "-"),
+                            support: String(rawP.tech?.support || "-"),
+                            pressure: String(rawP.tech?.pressure || "-")
+                        },
+                        strategy: {
+                            score: Number(rawP.strategy?.score) || 0,
+                            conclusion: String(rawP.strategy?.conclusion || "-"),
+                            short: String(rawP.strategy?.short || "-"),
+                            swing: String(rawP.strategy?.swing || "-"),
+                            stop: String(rawP.strategy?.stop || "-")
+                        },
+                        news: Array.isArray(rawP.news) ? rawP.news.map(n => ({
+                            date: String(n?.date || "-"),
+                            title: String(n?.title || "-"),
+                            impact: String(n?.impact || "-")
+                        })) : []
+                    };
+
+                    setAiData(safeAiData);
+                    localStorage.setItem(cacheKey, JSON.stringify({ timestamp: nowMs, data: safeAiData }));
+
+                    if (historyCache) {
+                        const realPrice = parseFloat(String(safeAiData.price).replace(/,/g, ''));
+                        const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
+                        if (!isNaN(realPrice)) {
+                            const lastC = historyCache[historyCache.length-1];
+                            if(lastC.time < today) {
+                                historyCache.push({ time: today, open: realPrice, high: realPrice, low: realPrice, close: realPrice, volume: 0 });
+                            } else {
+                                lastC.close = realPrice;
+                            }
+                            setChartData([...historyCache]);
+                        }
+                    }
+                } catch (e) { 
+                    if (e.message === "RATE_LIMIT" || e.message === "SERVER_BUSY" || e.message.includes("連線逾時")) {
+                        const mockData = getMockData(target, lastClosePrice);
+                        setAiData(mockData);
+                        setError("API 額度限制或伺服器異常。已啟動「離線測試模式」，圖表為真實報價，分析文字為測試排版之用。");
+                    } else {
+                        setError(`診斷異常：${e.message || "連線不穩定"}`); 
+                    }
+                } finally { 
+                    setAiLoading(false); 
+                    setLoading(false);
+                    isFetchingRef.current = false;
+                }
+            }, [customKey, aiModel]);
+
+            useEffect(() => { executeAnalysis(stockId); }, [stockId, executeAnalysis]);
+
+            const saveSettings = () => { 
+                const cleanKey = customKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
+                const cleanModel = aiModel.replace(/[^a-z0-9.-]/gi, '') || 'llama-3.3-70b-versatile';
+                localStorage.setItem('groq_api_key', cleanKey); 
+                localStorage.setItem('groq_model_name', cleanModel);
+                setCustomKey(cleanKey);
+                setAiModel(cleanModel);
+                setShowSettings(false); 
+                executeAnalysis(stockId);
+            };
+
+            const isUp = aiData?.change && !String(aiData.change).includes('-');
+            const priceColor = !aiData?.change || String(aiData.change) === '0' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
+            
+            const zenClass = zenMode ? "fixed inset-0 z-[9999] bg-black p-2 lg:p-4" : "";
+            const headerStatus = aiData?.name || (aiLoading ? '系統分析處理中' : '等待輸入指令');
+            const disableInput = aiLoading;
+
+            return (
+                <div ref={rootRef} className={`min-h-screen bg-black text-gray-200 font-sans p-1 lg:p-2 overflow-hidden flex flex-col ${zenClass}`}>
+                    
+                    <header className="flex-none flex flex-col md:flex-row justify-between items-center mb-2 bg-[#0a0a0a] p-2 lg:p-3 border border-gray-800 rounded shadow-sm">
+                        <div className="flex items-center gap-3">
+                            <h1 className="text-lg font-bold text-white tracking-tighter">{headerStatus}</h1>
+                            <span className="text-blue-500 font-mono text-sm border border-blue-900 px-2 py-0.5 bg-blue-950/20 rounded">{stockId}</span>
+                            <div className="h-6 w-px bg-gray-700 mx-2"></div>
+                            <span className={`text-3xl font-black font-mono tracking-tighter ${priceColor}`}>{aiData ? aiData.price : '---'}</span>
+                            <div className="flex flex-col text-xs font-bold font-mono ml-2">
+                                <span className={priceColor}>{aiData ? aiData.change : ''}</span>
+                                <span className={priceColor}>{aiData ? aiData.percent : ''}</span>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2 mt-3 md:mt-0">
+                            {aiLoading ? <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mr-1"></div> : null}
+                            <input 
+                                type="text" 
+                                value={inputValue} 
+                                onChange={e => setInputValue(e.target.value)} 
+                                onKeyDown={e => { if (e.key === 'Enter') handleSearch(); }} 
+                                placeholder="輸入代號" 
+                                disabled={disableInput}
+                                className="w-28 bg-[#111] border border-gray-700 px-2 py-1.5 text-xs font-bold rounded text-white focus:border-blue-600 outline-none transition-all disabled:opacity-50 disabled:cursor-not-allowed" 
+                            />
+                            <button onClick={handleSearch} disabled={disableInput} className="bg-blue-900/60 border border-blue-700 px-3 py-1.5 text-xs font-bold rounded hover:bg-blue-800 transition-all uppercase tracking-widest disabled:opacity-50 disabled:cursor-not-allowed">
+                                執行查詢
+                            </button>
+                            <button onClick={() => setShowSettings(!showSettings)} disabled={aiLoading} className="bg-gray-800 border border-gray-600 px-3 py-1.5 text-xs font-bold rounded hover:bg-gray-700 transition-all uppercase tracking-widest disabled:opacity-50">系統設定</button>
+                            <button onClick={zenMode ? () => setZenMode(false) : toggleFullScreen} className={`border px-3 py-1.5 text-xs font-black rounded transition-all uppercase tracking-widest ${zenMode || isFullScreen ? 'bg-red-900/40 border-red-700 text-red-200' : 'bg-blue-900/40 border-blue-700 text-blue-200 hover:bg-blue-800/60'}`}>
+                                {isFullScreen || zenMode ? '退出' : '全螢幕'}
+                            </button>
+                        </div>
+                    </header>
+
+                    {showSettings ? (
+                        <div className="absolute top-16 right-4 z-[100] w-[360px] p-5 glass-panel border border-gray-700 rounded shadow-2xl">
+                            <h3 className="text-base font-bold mb-4 border-b border-gray-800 pb-2 text-blue-400">Groq 核心連線配置</h3>
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="text-xs block text-gray-400 mb-2 font-bold tracking-widest font-mono">Groq API Key (gsk_ 開頭)</label>
+                                    <input type="password" value={customKey} onChange={e => setCustomKey(e.target.value)} className="w-full bg-black border border-gray-600 p-2 text-xs rounded focus:border-blue-500 outline-none font-mono" placeholder="貼入 API 金鑰" />
+                                </div>
+                                <div>
+                                    <label className="text-xs block text-gray-400 mb-2 font-bold tracking-widest font-mono">AI 運算模型配置</label>
+                                    <select value={aiModel} onChange={e => setAiModel(e.target.value)} className="w-full bg-black border border-gray-600 p-2 text-xs rounded focus:border-blue-500 outline-none font-mono text-gray-200">
+                                        <option value="llama-3.3-70b-versatile">Llama 3.3 70B (推薦/邏輯最強)</option>
+                                        <option value="llama-3.1-8b-instant">Llama 3.1 8B (極速/日常看盤)</option>
+                                        <option value="mixtral-8x7b-32768">Mixtral 8x7B (備援模型)</option>
+                                    </select>
+                                    <p className="text-[11px] text-gray-500 mt-2 leading-relaxed text-justify">
+                                        已更新為 Groq 最新穩定版模型。若遭遇 400 錯誤，通常是 API 格式不支援，系統會自動在畫面上印出真實錯誤原因協助除錯。
+                                    </p>
+                                </div>
+                                <div className="border-t border-gray-800 pt-4 mt-2">
+                                    <p className="text-[11px] text-gray-400 mb-2 font-bold">進階選項</p>
+                                    <button onClick={(e) => {
+                                        Object.keys(localStorage).forEach(k => { if(k.startsWith('groq_cache_')) localStorage.removeItem(k); });
+                                        e.target.innerText = "已清除！(下回查詢強制連線)";
+                                        setTimeout(() => { e.target.innerText = "清除本機深度分析快取"; }, 2000);
+                                    }} className="w-full bg-red-900/40 border border-red-800 text-red-300 py-2 text-xs font-bold rounded hover:bg-red-800 transition-colors">清除本機深度分析快取</button>
+                                </div>
+                                <div className="flex gap-3 pt-2">
+                                    <button onClick={saveSettings} className="flex-1 bg-blue-600 py-2 text-xs font-black rounded hover:bg-blue-500 transition-colors">儲存設定</button>
+                                    <button onClick={() => setShowSettings(false)} className="px-6 bg-gray-800 text-xs font-bold rounded hover:bg-gray-700">關閉</button>
+                                </div>
+                            </div>
+                        </div>
+                    ) : null}
+
+                    {error ? (
+                        <div className="flex-none bg-red-900/30 border border-red-500/50 text-red-200 p-2 text-center text-xs font-bold mb-2 rounded flex items-center justify-center gap-4 animate-pulse">
+                            <span>提示：{error}</span>
+                        </div>
+                    ) : null}
+
+                    <main className={`flex-1 grid grid-cols-1 lg:grid-cols-12 gap-2 overflow-hidden ${(isFullScreen || zenMode) ? 'h-full' : ''}`}>
+                        
+                        <div className="col-span-12 lg:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-1">
+                            {!customKey ? (
+                                <div className="bg-blue-900/20 border border-blue-700 p-4 rounded text-center mb-1">
+                                    <p className="text-xs text-blue-300 font-bold mb-3 tracking-widest leading-relaxed">請設定 Groq 金鑰以啟用 AI</p>
+                                    <button onClick={() => setShowSettings(true)} className="bg-blue-600 text-white text-xs px-6 py-2 rounded font-black hover:bg-blue-500 shadow">立即設定</button>
+                                </div>
+                            ) : null}
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
+                                <div className="bg-blue-950/40 border-b border-blue-900/60 p-2 px-3 text-blue-300 font-bold text-xs tracking-widest font-mono">市場聯動分析</div>
+                                <div className="p-3 space-y-2 text-xs">
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono tracking-widest">台股大盤 <span className="text-white font-bold">{aiData?.market?.taiex || (aiLoading ? "讀取中" : "---")}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono tracking-widest">費半指數 <span className="text-white font-bold">{aiData?.market?.sox || (aiLoading ? "讀取中" : "---")}</span></div>
+                                    <div className="flex justify-between pb-0.5 font-mono tracking-widest">那斯達克 <span className="text-white font-bold">{aiData?.market?.nasdaq || (aiLoading ? "讀取中" : "---")}</span></div>
+                                </div>
+                            </div>
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
+                                <div className="bg-purple-950/40 border-b border-purple-900/60 p-2 px-3 text-purple-300 font-bold text-xs tracking-widest font-mono">同業競爭比較</div>
+                                <div className="p-3 space-y-2 text-xs">
+                                    {aiData?.peers && aiData.peers.length > 0 ? (
+                                        aiData.peers.map((p, i) => (
+                                            <div key={i} className="flex justify-between bg-gray-900/40 p-2.5 mb-2 rounded border border-gray-800 font-mono">
+                                                <span className="text-white font-bold">{p.name}</span>
+                                                <span className={p.change && String(p.change).includes('-') ? 'text-green-500' : 'text-red-500'}>{p.change}</span>
+                                            </div>
+                                        ))
+                                    ) : (
+                                        <div className="loading-shimmer h-12 rounded opacity-10"></div>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="bg-[#050505] border border-gray-800 rounded flex-1">
+                                <div className="bg-slate-900 border-b border-gray-700 p-2 px-3 text-gray-300 font-bold text-xs tracking-widest font-mono">基本面與估值</div>
+                                <div className="p-3 space-y-2 text-xs">
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">殖利率/股淨比 <span className="text-white font-bold font-mono">{aiData?.valuation?.yield || "---"} / {aiData?.valuation?.pb || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">AI 估值評等 <span className="text-yellow-500 font-black tracking-widest text-sm">{aiData?.valuation?.rating || "---"}</span></div>
+                                    <div className="mt-2 text-gray-400 bg-gray-900/50 p-3 border border-gray-800 text-justify leading-relaxed text-[13px] font-medium">{aiData?.fund?.status || (aiLoading ? "正在彙整深度財報..." : "等待資訊同步")}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="col-span-12 lg:col-span-6 flex flex-col overflow-hidden">
+                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 flex flex-col relative overflow-hidden shadow-sm">
+                                <div className="bg-green-950/40 border-b border-green-900/60 p-2 px-3 flex justify-between items-center z-10 h-10">
+                                    <span className="text-green-300 font-bold text-xs tracking-widest font-mono">技術線圖儀表板</span>
+                                    <div className="flex border border-gray-600 rounded overflow-hidden h-7 bg-black">
+                                        <button onClick={() => setTimeframe('1D')} disabled={aiLoading} className={`px-4 text-xs font-black transition-colors ${timeframe === '1D' ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'} disabled:opacity-50`}>日線</button>
+                                        <button onClick={() => setTimeframe('1W')} disabled={aiLoading} className={`px-4 text-xs font-black transition-colors ${timeframe === '1W' ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'} disabled:opacity-50`}>週線</button>
+                                    </div>
+                                </div>
+                                <div className="flex-1 relative bg-black flex flex-col">
+                                    {(!loading && chartData.length === 0 && !error) ? (
+                                        <div className="absolute inset-0 flex flex-col justify-center items-center z-10 bg-black/90">
+                                            <span className="text-gray-500 text-sm font-black tracking-[0.5em]">報價伺服器連線中斷</span>
+                                        </div>
+                                    ) : null}
+                                    {(loading && chartData.length === 0) ? (
+                                        <div className="absolute inset-0 flex flex-col justify-center items-center z-10 bg-black/90">
+                                            <span className="text-gray-600 text-sm font-black animate-pulse tracking-[0.5em]">資料連線建立中...</span>
+                                        </div>
+                                    ) : null}
+                                    <div ref={containerRefs.kline} className="w-full flex-1" />
+                                    <div ref={containerRefs.vol} className="w-full h-[70px] flex-none border-t border-terminal" />
+                                    <div ref={containerRefs.macd} className="w-full h-[90px] flex-none border-t border-terminal" />
+                                    <div ref={containerRefs.kdj} className="w-full h-[90px] flex-none border-t border-terminal" />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="col-span-12 lg:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pl-1">
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
+                                <div className="bg-purple-950/40 border-b border-purple-900/60 p-2 px-3 text-purple-300 font-bold text-xs tracking-widest font-mono">籌碼流向分析</div>
+                                <div className="p-3 space-y-2 text-xs">
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">外資動態 <span className="text-white font-bold font-mono">{aiData?.chips?.foreign || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">投信動態 <span className="text-blue-400 font-bold font-mono">{aiData?.chips?.trust || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter text-blue-400">主力持股 <span className="text-white font-black font-mono">{aiData?.chips?.big || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter text-green-400">散戶持股 <span className="text-white font-bold font-mono">{aiData?.chips?.retail || "---"}</span></div>
+                                    <div className="mt-2 text-gray-400 bg-gray-900/50 p-3 border border-gray-800 leading-relaxed text-justify text-[13px] font-medium">{aiData?.chips?.status || (aiLoading ? "正在解析籌碼結構..." : "等待同步")}</div>
+                                </div>
+                            </div>
+
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
+                                <div className="bg-orange-950/40 border-b border-orange-900/60 p-2 px-3 flex justify-between items-center text-orange-300 font-bold text-xs tracking-widest font-mono"><span>AI 戰略矩陣</span><span className="text-lg font-black text-white font-mono">{aiData?.strategy?.score || 0} 評分</span></div>
+                                <div className="p-3 space-y-2 text-xs">
+                                    <div className="bg-gray-900/60 p-3 rounded border border-gray-800 leading-tight"><span className="text-white font-black block mb-2 text-sm font-mono">{aiData?.strategy?.conclusion || (aiLoading ? "計算核心戰略中..." : "等待分析")}</span><span className="text-gray-400 block text-xs tracking-tighter font-bold font-mono">短線操作：{aiData?.strategy?.short || "Analyzing"}</span></div>
+                                    <div className="flex justify-between p-2.5 bg-red-950/20 border border-red-900/50 font-mono text-red-400 font-black text-xs tracking-tighter">停損建議 <span className="text-white font-black tracking-widest font-mono text-sm">{aiData?.strategy?.stop || "---"}</span></div>
+                                </div>
+                            </div>
+
+                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 min-h-[200px] shadow-sm">
+                                <div className="bg-yellow-950/40 border-b border-yellow-900/60 p-2 px-3 text-yellow-300 font-bold text-xs tracking-widest font-mono">即時情報新聞</div>
+                                <div className="p-2 space-y-2">
+                                    {aiData?.news && aiData.news.length > 0 ? (
+                                        aiData.news.map((n, i) => (
+                                            <a key={i} href={"https://www.google.com/search?q=" + encodeURIComponent(stockId + ' ' + String(n.title)) + "&tbm=nws"} target="_blank" rel="noreferrer" className="block border-b border-gray-800 border-dotted p-2.5 hover:bg-gray-800 transition-all group">
+                                                <div className="flex justify-between text-[11px] mb-1.5 font-mono text-gray-500">{n.date} <span className={n.impact === '多' ? 'text-red-500 font-black' : 'text-green-500 font-black'}>{n.impact}</span></div>
+                                                <span className="text-gray-200 font-bold text-xs line-clamp-2 leading-relaxed group-hover:text-blue-400 transition-colors">{n.title}</span>
+                                            </a>
+                                        ))
+                                    ) : (
+                                        <div className="loading-shimmer h-24 rounded opacity-10 mt-2"></div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </main>
+
+                    <style dangerouslySetInnerHTML={{ __html: `
+                        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
+                        .custom-scrollbar::-webkit-scrollbar-track { background: #000; }
+                        .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+                        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
+                        * { scrollbar-width: thin; scrollbar-color: #333 #000; }
+                    `}} />
+                </div>
+            );
+        };
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
