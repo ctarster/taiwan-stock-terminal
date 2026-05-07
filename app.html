@@ -13,30 +13,32 @@
         body { background-color: #030303; margin: 0; padding: 0; color: #d1d5db; overflow: hidden; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
         #root { height: 100%; width: 100%; }
         
-        /* 流暢滾動條設定 */
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); border-radius: 4px; }
+        /* 訂製流暢滾動條 */
+        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(0,0,0,0.1); border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
         * { scrollbar-width: thin; scrollbar-color: #333 transparent; }
         :-webkit-full-screen { background-color: #030303; }
         
-        /* 動畫設定 */
-        @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        /* 進階動畫定義 */
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes glowPulse { 0%, 100% { box-shadow: 0 0 10px rgba(37, 99, 235, 0.1); border-color: rgba(37, 99, 235, 0.2); } 50% { box-shadow: 0 0 20px rgba(37, 99, 235, 0.3); border-color: rgba(37, 99, 235, 0.5); } }
+        @keyframes glowPulse { 0%, 100% { box-shadow: 0 0 10px rgba(37, 99, 235, 0.1); border-color: rgba(37, 99, 235, 0.2); } 50% { box-shadow: 0 0 25px rgba(37, 99, 235, 0.3); border-color: rgba(37, 99, 235, 0.5); } }
         @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
+        /* 動畫類別 */
         .animate-fade-up { opacity: 0; animation: fadeInUp 0.5s ease-out forwards; }
         .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
         .delay-50 { animation-delay: 50ms; }
         .delay-100 { animation-delay: 100ms; }
         .delay-150 { animation-delay: 150ms; }
+        .delay-200 { animation-delay: 200ms; }
         .header-glow { animation: glowPulse 3s infinite ease-in-out; }
-        .loading-shimmer { background: linear-gradient(90deg, rgba(255,255,255,0.02) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.02) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite linear; }
         
+        .loading-shimmer { background: linear-gradient(90deg, rgba(255,255,255,0.02) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.02) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite linear; }
         .glass-panel { background: rgba(10, 10, 10, 0.95); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); }
-        .panel-card { background-color: #0a0a0a; border: 1px solid rgba(255,255,255,0.06); border-radius: 0.5rem; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5); transition: border-color 0.3s ease; }
+        .panel-card { background-color: #0a0a0a; border: 1px solid rgba(255,255,255,0.06); border-radius: 0.75rem; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.5); transition: border-color 0.3s ease; }
         .panel-card:hover { border-color: rgba(255,255,255,0.15); }
     </style>
 </head>
@@ -46,7 +48,7 @@
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
 
-        // 技術指標核心
+        // --- 技術指標運算核心 ---
         const Indicators = {
             ema: (data, period) => {
                 if (!data || data.length === 0) return [];
@@ -104,7 +106,60 @@
             return weekly;
         };
 
-        // Yahoo 即時報價引擎 (修復 CORS 與代理穩定性)
+        // --- 全新高穩定度 Yahoo 歷史報價引擎 (取代 FinMind) ---
+        const fetchHistoryYahoo = async (target) => {
+            const timestamp = Date.now();
+            const proxies = [
+                `https://api.allorigins.win/get?url=`,
+                `https://corsproxy.io/?`
+            ];
+            
+            for (let ext of ['.TW', '.TWO']) {
+                const url = encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1y&_t=${timestamp}`);
+                for (let proxy of proxies) {
+                    try {
+                        const res = await fetch(`${proxy}${url}`, { cache: 'no-store' });
+                        if (!res.ok) continue;
+                        let data = await res.json();
+                        if (proxy.includes('allorigins')) {
+                            if (!data.contents) continue;
+                            data = JSON.parse(data.contents);
+                        }
+                        if (data.chart?.error) continue;
+                        
+                        const result = data.chart.result[0];
+                        const timestamps = result.timestamp;
+                        const quote = result.indicators.quote[0];
+                        if (!timestamps || !quote) continue;
+                        
+                        const history = [];
+                        const seenDates = new Set();
+                        
+                        for (let i = 0; i < timestamps.length; i++) {
+                            if (quote.close[i] === null || quote.open[i] === null) continue;
+                            const d = new Date(timestamps[i] * 1000);
+                            const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                            
+                            if (seenDates.has(dateStr)) continue;
+                            seenDates.add(dateStr);
+                            
+                            history.push({
+                                time: dateStr,
+                                open: Number(quote.open[i]),
+                                high: Number(quote.high[i]),
+                                low: Number(quote.low[i]),
+                                close: Number(quote.close[i]),
+                                volume: Number(quote.volume[i])
+                            });
+                        }
+                        if (history.length > 0) return history;
+                    } catch(e) { console.warn("History Proxy Failed", e); }
+                }
+            }
+            return [];
+        };
+
+        // --- 多重代理備援 Yahoo 即時報價引擎 ---
         const fetchRealTimeYahoo = async (target) => {
             const timestamp = Date.now();
             const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}.TW,${target}.TWO&_t=${timestamp}`;
@@ -157,9 +212,7 @@
                         open: open, high: high, low: low, close: close, volume: volume,
                         marketCap: marketCapStr
                     };
-                } catch (e) {
-                    console.warn(`Proxy Failed (${proxy.url}):`, e.message);
-                }
+                } catch (e) { console.warn(`Proxy Failed (${proxy.url}):`, e.message); }
             }
             return null; 
         };
@@ -178,13 +231,28 @@
             }
         };
 
+        const getMockData = (symbol, price) => ({
+            name: `${symbol} (安全模式)`, price: String(price), change: "---", percent: "---", industry: "離線防護",
+            market: { taiex: "等候連線", sox: "等候連線", nasdaq: "等候連線" },
+            peers: [{ name: "防護系統A", change: "---" }, { name: "防護系統B", change: "---" }],
+            valuation: { yield: "---", pb: "---", rating: "連線異常", marketCap: "---" },
+            growth: { mom: "---", yoy: "---", forwardPE: "---", grossMargin: "---" },
+            risk: { level: "未知", details: "網路或金鑰狀態異常，啟動安全防護模式。圖表為真實報價，但文字分析已凍結。" },
+            fund: { eps: "---", gross: "---", net: "---", status: "等待網路或金鑰狀態恢復..." },
+            chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "等待狀態恢復..." },
+            moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "無資料。" },
+            tech: { ma: "---", support: "---", pressure: "---" },
+            strategy: { score: 0, conclusion: "安全模式運行中", short: "---", swing: "---", stop: "---" },
+            news: []
+        });
+
         const App = () => {
             const [stockId, setStockId] = useState('2330');
             const [inputValue, setInputValue] = useState('');
             const [customKey, setCustomKey] = useState(() => (localStorage.getItem('groq_api_key') || '').trim());
             const [aiModel, setAiModel] = useState(() => (localStorage.getItem('groq_model_name') || 'llama-3.3-70b-versatile').trim());
             
-            // 自選追蹤清單與獨立報價
+            // 直式追蹤清單狀態管理
             const [watchlist, setWatchlist] = useState(() => {
                 try {
                     return JSON.parse(localStorage.getItem('quant_watchlist')) || [
@@ -220,6 +288,7 @@
             const inputRef = useRef(null); 
             const chartRefs = useRef({});
             const seriesRefs = useRef({});
+            
             const containerRefs = { kline: useRef(null), vol: useRef(null), macd: useRef(null), kdj: useRef(null) };
             
             const isSyncing = useRef(false);
@@ -228,7 +297,7 @@
             const refreshTimer = useRef(null);
             const enrichedDataRef = useRef([]);
 
-            // 處理追蹤清單增刪
+            // 追蹤清單邏輯
             const isWatched = watchlist.some(w => w.id === stockId);
             const toggleWatchlist = () => {
                 setWatchlist(prev => {
@@ -243,7 +312,7 @@
                 });
             };
 
-            // 安全序列化抓取追蹤清單報價 (解決 429 阻擋)
+            // 【修復】徹底恢復追蹤清單背景報價引擎 (防 429 機制)
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -252,26 +321,27 @@
                     const newQuotes = { ...watchlistQuotes };
                     for (const item of watchlist) {
                         if (!isActive) break;
-                        const rtData = await fetchRealTimeYahoo(item.id);
-                        if (rtData) {
-                            newQuotes[item.id] = {
-                                price: rtData.price,
-                                change: rtData.change,
-                                percent: rtData.percent
-                            };
-                            setWatchlistQuotes({ ...newQuotes }); // 抓到一筆更新一筆
-                        }
-                        // 加入小延遲，防止被 Yahoo 阻擋
-                        await new Promise(r => setTimeout(r, 300));
+                        try {
+                            const rtData = await fetchRealTimeYahoo(item.id);
+                            if (rtData) {
+                                newQuotes[item.id] = {
+                                    price: rtData.price,
+                                    change: rtData.change,
+                                    percent: rtData.percent
+                                };
+                                setWatchlistQuotes({ ...newQuotes }); 
+                            }
+                        } catch(e){}
+                        await new Promise(r => setTimeout(r, 250)); // 避免被短時間內阻擋
                     }
                 };
                 
                 updateWatchlistQuotes();
-                const interval = setInterval(updateWatchlistQuotes, 20000); // 20秒輪詢一次
+                const interval = setInterval(updateWatchlistQuotes, 15000); 
                 return () => { isActive = false; clearInterval(interval); };
             }, [watchlist]);
 
-            // 載入全市場清單
+            // 載入全市場清單供轉換
             useEffect(() => {
                 const loadStockList = async () => {
                     try {
@@ -348,7 +418,7 @@
                 return () => document.removeEventListener('fullscreenchange', fn);
             }, []);
 
-            // --- 徹底解決 KDJ 被切斷的圖表初始化邏輯 ---
+            // --- 圖表初始化 (彈性高度、確保完全不溢出) ---
             const initCharts = useCallback(() => {
                 if (!window.LightweightCharts || isChartInitialized.current || !containerRefs.kline.current) return;
                 
@@ -381,7 +451,6 @@
                 chartRefs.current = { kChart, vChart, mChart, kjChart };
                 seriesRefs.current = { kSeries, ma5Series, ma20Series, ma60Series, vSeries, macdDifSeries: mDif, macdDeaSeries: mDea, macdHistSeries: mHist, kdjKSeries: kjK, kdjDSeries: kjD, kdjJSeries: kjJ };
 
-                // 安全的 ResizeObserver，防止無窮迴圈
                 const resizeObserver = new ResizeObserver(entries => {
                     window.requestAnimationFrame(() => {
                         for (let entry of entries) {
@@ -423,7 +492,17 @@
             }, []);
 
             const updateChartData = useCallback((historyArray) => {
-                if (!isChartInitialized.current || !historyArray || historyArray.length === 0) return;
+                if (!isChartInitialized.current) return;
+                const s = seriesRefs.current;
+                if (!s.kSeries) return;
+
+                if (!historyArray || historyArray.length === 0) {
+                    s.kSeries.setData([]); s.ma5Series.setData([]); s.ma20Series.setData([]); s.ma60Series.setData([]);
+                    s.vSeries.setData([]); s.macdDifSeries.setData([]); s.macdDeaSeries.setData([]); s.macdHistSeries.setData([]);
+                    s.kdjKSeries.setData([]); s.kdjDSeries.setData([]); s.kdjJSeries.setData([]);
+                    return;
+                }
+
                 const sorted = [...historyArray].sort((a, b) => new Date(a.time) - new Date(b.time));
                 const closePrices = sorted.map(d => d.close);
                 const ma5 = Indicators.ema(closePrices, 5);
@@ -440,9 +519,6 @@
                 }));
                 enrichedDataRef.current = enriched;
                 setHoverData(enriched[enriched.length - 1]); 
-
-                const s = seriesRefs.current;
-                if (!s.kSeries) return;
 
                 s.kSeries.setData(sorted);
                 s.ma5Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma5[i] })));
@@ -465,7 +541,7 @@
                 }
             }, [timeframe, chartData, initCharts, updateChartData]);
 
-            // AI 分析與真實數據抓取邏輯
+            // --- 執行分析與資料抓取 ---
             const executeAnalysis = useCallback(async (target, isRefresh = false) => {
                 if (!target || isFetchingRef.current) return;
                 isFetchingRef.current = true;
@@ -485,20 +561,12 @@
                         if (stock) officialName = stock.stock_name;
                     }
 
-                    const d = new Date(); d.setFullYear(d.getFullYear()-1);
-                    const historyRes = await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`);
-                    const hJson = await historyRes.json();
+                    // 強制改用 Yahoo 歷史報價代理
+                    let historyCache = await fetchHistoryYahoo(target);
                     
-                    let historyCache = [];
-                    if (hJson && hJson.msg === 'success' && hJson.data?.length) {
-                        historyCache = hJson.data.map(i => ({ 
-                            time: i.date, open: Number(i.open), high: Number(i.max), low: Number(i.min), close: Number(i.close), volume: Number(i.Trading_Volume) 
-                        }));
-                    }
-
                     try { rtData = await fetchRealTimeYahoo(target); } catch(e) {}
 
-                    if (historyCache.length > 0) {
+                    if (historyCache && historyCache.length > 0) {
                         const latest = historyCache[historyCache.length-1];
                         if (rtData) {
                             lastClosePrice = rtData.price;
@@ -530,7 +598,8 @@
 
                     const cleanKey = customKey ? customKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '') : "";
                     if (!cleanKey) {
-                        throw new Error("尚未設定有效金鑰");
+                        if(!isRefresh) setAiData(getMockData(officialName, lastClosePrice));
+                        setAiLoading(false); setLoading(false); isFetchingRef.current = false; return; 
                     }
 
                     const nowMs = Date.now();
@@ -543,15 +612,11 @@
                             if (nowMs - parsedCache.timestamp < 14400000) { 
                                 const cachedData = parsedCache.data;
                                 if (rtData) {
-                                    cachedData.price = rtData.price;
-                                    cachedData.change = rtData.change;
-                                    cachedData.percent = rtData.percent;
+                                    cachedData.price = rtData.price; cachedData.change = rtData.change; cachedData.percent = rtData.percent;
                                     if(rtData.marketCap && rtData.marketCap !== "---") cachedData.valuation.marketCap = rtData.marketCap;
                                 }
                                 setAiData(cachedData);
-                                setAiLoading(false); setLoading(false);
-                                isFetchingRef.current = false;
-                                return; 
+                                setAiLoading(false); setLoading(false); isFetchingRef.current = false; return; 
                             }
                         } catch (e) {}
                     }
@@ -564,14 +629,11 @@
                                 return newD;
                             });
                         }
-                        setAiLoading(false); setLoading(false);
-                        isFetchingRef.current = false;
-                        return;
+                        setAiLoading(false); setLoading(false); isFetchingRef.current = false; return;
                     }
 
                     const safeModel = aiModel ? aiModel.replace(/[^a-z0-9.-]/gi, '') : "llama-3.3-70b-versatile";
                     
-                    // 重寫 Prompt 強制要求 AI 輸出估算值
                     const prompt = `分析台股代號[${target}]，正式名稱為[${officialName}]。
                     任務：依據最新狀態提供大盤聯動、估值、營收成長、風險預警、籌碼面、資金流向與最新動態。
                     【絕對強制規則】：
@@ -579,10 +641,9 @@
                     2. 若缺乏精確數據，請運用你的知識庫給出合理的「市場預估值」或「趨勢描述 (如: 衰退、成長、強勢)」，絕對不允許填入 "---" 或留白。
                     3. 若在新聞或點評中提及任何實體商品時，務必清楚寫出具體的「品牌」與「型號」。
                     4. 必須且只能回傳 JSON 格式。請直接輸出 JSON 大括號，不要包含 Markdown 標籤。
-                    JSON結構：{"name":"${officialName}","price":"現價","change":"漲跌","percent":"幅度","industry":"產業","market":{"taiex":"大盤","sox":"費半","nasdaq":"那指"},"peers":[{"name":"同業","change":"漲跌"}],"valuation":{"yield":"殖利率","pb":"股淨比","rating":"評價","marketCap":"總市值"},"growth":{"mom":"月營收增減","yoy":"年營收增減","forwardPE":"預估本益比","grossMargin":"最新毛利率"},"risk":{"level":"高/中/低","details":"風險與事件說明"},"fund":{"eps":"EPS","gross":"毛利","net":"淨利","status":"點評"},"chips":{"foreign":"外資","trust":"投信","big":"主力","retail":"散戶","status":"點評"},"moneyFlow":{"inflow":"流入預估","outflow":"流出預估","net":"淨流入流出","analysis":"資金面點評"},"tech":{"ma":"均線","support":"支撐","pressure":"壓力"},"strategy":{"score":85,"conclusion":"判定","short":"短線","swing":"策略","stop":"停損"},"news":[{"date":"日期","title":"標題","snippet":"新聞內容詳細預覽摘要(必填)","impact":"多空"}]}`;
+                    JSON結構：{"name":"${officialName}","price":"現價","change":"漲跌","percent":"幅度","industry":"產業","market":{"taiex":"大盤","sox":"費半","nasdaq":"那指"},"peers":[{"name":"同業","change":"漲跌"}],"valuation":{"yield":"殖利率","pb":"股淨比","rating":"評價","marketCap":"總市值"},"growth":{"mom":"月營收增減","yoy":"年營收增減","forwardPE":"預估本益比","grossMargin":"最新毛利率"},"risk":{"level":"高/中/低","details":"風險與事件說明"},"fund":{"eps":"EPS","gross":"毛利","net":"淨利","status":"點評"},"chips":{"foreign":"外資","trust":"投信","big":"主力","retail":"散戶","status":"點評"},"moneyFlow":{"inflow":"流入預估","outflow":"流出預估","net":"淨流入流出","analysis":"資金面點評"},"tech":{"ma":"均線","support":"支撐","pressure":"壓力"},"strategy":{"score":85,"conclusion":"判定","short":"短線","swing":"策略","stop":"停損"},"news":[{"date":"日期","title":"標題","snippet":"新聞內容詳細預覽摘要(必填，不能空白)","impact":"多空"}]}`;
 
                     const apiUrl = `https://api.groq.com/openai/v1/chat/completions`;
-
                     const aiRes = await fetchWithTimeout(apiUrl, {
                         method: 'POST', 
                         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cleanKey}` },
@@ -632,31 +693,20 @@
                     localStorage.setItem(cacheKey, JSON.stringify({ timestamp: nowMs, data: safeAiData }));
 
                 } catch (e) { 
-                    // 防呆：如果 AI 失敗，強制將剛剛抓到的真實即時報價保留！不要全部變 "---"
                     const fallbackData = {
-                        name: officialName,
-                        price: rtData?.price || lastClosePrice,
-                        change: rtData?.change || "---",
-                        percent: rtData?.percent || "---",
-                        industry: "---",
-                        market: { taiex: "連線異常", sox: "連線異常", nasdaq: "連線異常" },
-                        peers: [],
+                        name: officialName, price: rtData?.price || lastClosePrice, change: rtData?.change || "---", percent: rtData?.percent || "---", industry: "---",
+                        market: { taiex: "連線異常", sox: "連線異常", nasdaq: "連線異常" }, peers: [],
                         valuation: { yield: "---", pb: "---", rating: "---", marketCap: rtData?.marketCap || "---" },
                         growth: { mom: "---", yoy: "---", forwardPE: "---", grossMargin: "---" },
                         risk: { level: "---", details: "AI 分析失敗或連線逾時，圖表與頂部為真實報價，請檢查金鑰或稍後再試。" },
-                        fund: { eps: "---", gross: "---", net: "---", status: "分析連線逾時" },
-                        chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "分析連線逾時" },
-                        moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "分析連線逾時" },
-                        tech: { ma: "---", support: "---", pressure: "---" },
-                        strategy: { score: 0, conclusion: "連線失敗", short: "---", swing: "---", stop: "---" },
-                        news: []
+                        fund: { eps: "---", gross: "---", net: "---", status: "分析連線逾時" }, chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "分析連線逾時" },
+                        moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "分析連線逾時" }, tech: { ma: "---", support: "---", pressure: "---" },
+                        strategy: { score: 0, conclusion: "連線失敗", short: "---", swing: "---", stop: "---" }, news: []
                     };
                     setAiData(fallbackData);
                     if(!isRefresh) setError(`AI 存取異常，已啟動防護模式保留報價：${e.message}`); 
                 } finally { 
-                    setAiLoading(false); 
-                    setLoading(false);
-                    isFetchingRef.current = false;
+                    setAiLoading(false); setLoading(false); isFetchingRef.current = false;
                 }
             }, [customKey, aiModel, fullStockList]);
 
@@ -679,20 +729,17 @@
 
             const isUp = aiData?.change && !String(aiData.change).includes('-');
             const priceColor = !aiData?.change || String(aiData.change) === '0' || String(aiData.change) === '---' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
-            
             const zenClass = zenMode ? "fixed inset-0 z-[9999] bg-[#030303] p-2 lg:p-4" : "";
-            const headerStatus = aiData?.name || (aiLoading ? '系統啟動中' : '等待輸入');
             const disableInput = aiLoading;
 
             return (
                 <div key={animationKey} ref={rootRef} className={`min-h-screen bg-[#030303] text-gray-200 font-sans p-1.5 lg:p-3 overflow-hidden flex flex-col ${zenClass}`}>
                     
-                    {/* 頂部標頭列 */}
                     <header className="flex-none flex flex-col md:flex-row justify-between items-center mb-2 lg:mb-3 bg-[#0a0a0a] p-3 lg:p-4 border border-white/5 rounded-xl shadow-[0_4px_20px_rgba(0,0,0,0.5)] relative header-glow">
                         <div className="flex flex-col lg:flex-row lg:items-center gap-4 w-full lg:w-auto">
                             <div className="flex items-center gap-4">
                                 <div className="flex flex-col animate-fade-in">
-                                    <h1 className="text-xl font-bold text-white tracking-tighter">{headerStatus}</h1>
+                                    <h1 className="text-xl font-bold text-white tracking-tighter">{aiData?.name || '系統啟動中'}</h1>
                                     <span className="text-blue-500 font-mono text-sm uppercase tracking-widest">{stockId}</span>
                                 </div>
                                 <div className="h-8 w-px bg-white/10 mx-2 hidden lg:block animate-fade-in delay-50"></div>
@@ -713,7 +760,6 @@
                                 {isWatched ? '取消追蹤' : '加入追蹤'}
                             </button>
 
-                            {/* 智慧搜尋框容器 */}
                             <div className="relative" ref={inputRef}>
                                 <input 
                                     type="text" 
@@ -789,14 +835,10 @@
                         {/* 左側：自選、聯動、同業、估值、成長 */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-1 pb-1">
                             
-                            {/* 直式自選追蹤清單面板 (可隱藏/展開動畫) */}
                             <div className="panel-card flex-none animate-fade-up transition-all duration-500 overflow-hidden border-yellow-900/30">
-                                <div 
-                                    className="bg-yellow-950/20 border-b border-white/5 p-3 px-4 flex justify-between items-center cursor-pointer hover:bg-yellow-900/30 transition-colors"
-                                    onClick={() => setIsWatchlistExpanded(!isWatchlistExpanded)}
-                                >
+                                <div className="bg-yellow-950/20 border-b border-white/5 p-3 px-4 flex justify-between items-center cursor-pointer hover:bg-yellow-900/30 transition-colors" onClick={() => setIsWatchlistExpanded(!isWatchlistExpanded)}>
                                     <span className="text-yellow-400 font-bold text-xs tracking-widest uppercase">自選追蹤清單</span>
-                                    <div className={`transform transition-transform duration-300 text-[10px] text-gray-500 ${isWatchlistExpanded ? 'rotate-180' : 'rotate-0'}`}>▼</div>
+                                    <span className="text-gray-500 transform transition-transform duration-300 select-none text-[10px]" style={{ transform: isWatchlistExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>▼</span>
                                 </div>
                                 <div className={`transition-all duration-500 ease-in-out bg-black/20 ${isWatchlistExpanded ? 'max-h-[300px] opacity-100' : 'max-h-0 opacity-0'}`}>
                                     <div className="p-2 flex flex-col gap-1 overflow-y-auto custom-scrollbar" style={{ maxHeight: '250px' }}>
@@ -805,11 +847,7 @@
                                             const isWUp = quote && parseFloat(quote.change) >= 0;
                                             const colorClass = !quote ? 'text-gray-500' : isWUp ? 'text-red-400' : 'text-green-400';
                                             return (
-                                                <div 
-                                                    key={item.id} 
-                                                    onClick={() => executeJump(item.id)}
-                                                    className={`flex justify-between items-center p-2 rounded-lg cursor-pointer transition-all duration-200 border ${stockId === item.id ? 'bg-white/10 border-white/20 shadow-inner' : 'bg-transparent border-transparent hover:bg-white/5'}`}
-                                                >
+                                                <div key={item.id} onClick={() => executeJump(item.id)} className={`flex justify-between items-center p-2 rounded-lg cursor-pointer transition-all duration-200 border ${stockId === item.id ? 'bg-white/10 border-white/20 shadow-inner' : 'bg-transparent border-transparent hover:bg-white/5'}`}>
                                                     <div className="flex flex-col">
                                                         <span className="text-white font-bold text-xs">{item.name}</span>
                                                         <span className="text-gray-500 font-mono text-[9px]">{item.id}</span>
@@ -877,7 +915,7 @@
                             </div>
                         </div>
 
-                        {/* 中間圖表區塊：自適應 Flex H-0 絕對填滿不溢出 (完美解決 KDJ 切掉問題) */}
+                        {/* 中間圖表區塊：自適應 Flex H-0 絕對填滿不溢出 */}
                         <div className="col-span-12 lg:col-span-6 flex flex-col overflow-hidden pb-1">
                             <div className="panel-card flex-1 flex flex-col overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.8)] animate-fade-up delay-100">
                                 
@@ -897,7 +935,6 @@
                                     </div>
                                 </div>
 
-                                {/* 利用 flex-1 h-0 讓內部圖表依據 flex-grow 自動分配高度 */}
                                 <div className="flex-1 bg-black/30 flex flex-col h-0 overflow-hidden p-1">
                                     {(!loading && chartData.length === 0 && !error) ? (
                                         <div className="absolute inset-0 flex flex-col justify-center items-center z-20 bg-black/80 backdrop-blur-sm">
@@ -947,7 +984,7 @@
                                         <div ref={containerRefs.macd} className="flex-1 w-full h-full pt-4" />
                                     </div>
                                     
-                                    {/* KDJ (佔 1 份)，加入底部安全距緣 pb-2 確保完全不被切斷 */}
+                                    {/* KDJ (佔 1 份) */}
                                     <div className="relative w-full flex-[1] min-h-0 flex flex-col border-t border-white/5 bg-black/20 rounded-b-xl overflow-hidden pb-2">
                                         <div className="absolute top-1 left-2 z-10 flex gap-2 text-[10px] font-mono pointer-events-none">
                                             <div className="bg-black/80 px-2 py-0.5 rounded text-gray-300 font-bold border border-white/5">KDJ (9,3,3)</div>
@@ -995,7 +1032,7 @@
                                 <div className="bg-yellow-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl flex justify-between items-center">
                                     <span className="text-yellow-400 font-bold text-xs tracking-widest uppercase">即時情報與觀點</span>
                                 </div>
-                                {/* 手風琴式新聞預覽：Hover 平滑向下展開 */}
+                                {/* 手風琴式新聞預覽：Hover 展開顯示 Snippet */}
                                 <div className="p-2 space-y-1 flex-1 overflow-y-auto custom-scrollbar">
                                     {aiData?.news && aiData.news.length > 0 ? (
                                         aiData.news.map((n, i) => (
