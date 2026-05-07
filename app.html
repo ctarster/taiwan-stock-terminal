@@ -99,8 +99,10 @@
             peers: [{ name: "模擬對手A", change: "+1.2%" }, { name: "模擬對手B", change: "-0.5%" }],
             valuation: { yield: "---", pb: "---", rating: "測試評估", marketCap: "---" },
             growth: { mom: "-1.5%", yoy: "+12.4%", forwardPE: "15.2", grossMargin: "35.6%" },
-            fund: { eps: "---", gross: "---", net: "---", status: "由於 API 額度耗盡或網路異常，目前啟動「離線測試模式」。圖表為真實台股報價，但此處文字分析皆為系統虛擬生成，僅供測試介面排版使用。" },
-            chips: { foreign: "模擬", trust: "模擬", big: "模擬", retail: "模擬", status: "籌碼資料模擬中。請等待 API 額度恢復後再重新整理取得真實數據。" },
+            risk: { level: "中", details: "離線模式無法判定真實風險，請恢復連線。" },
+            fund: { eps: "---", gross: "---", net: "---", status: "由於 API 額度耗盡或網路異常，目前啟動「離線測試模式」。圖表為真實報價，文字分析皆為系統生成排版使用。" },
+            chips: { foreign: "模擬", trust: "模擬", big: "模擬", retail: "模擬", status: "籌碼資料模擬中。請等待 API 額度恢復後取得真實數據。" },
+            moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "離線模式無資金數據。" },
             tech: { ma: "均線模擬", support: "---", pressure: "---" },
             strategy: { score: 88, conclusion: "離線運行中", short: "測試狀態", swing: "模擬策略", stop: "---" },
             news: [
@@ -109,36 +111,34 @@
             ]
         });
 
-        // 核心修復：使用動態 timestamp 徹底擊穿快取，抓取 Yahoo Finance 絕對即時盤中資料
+        // 終極修復：改用 Yahoo Quote 端點，徹底解決漲跌幅與昨收價格錯誤的問題
         const fetchRealTimeYahoo = async (target) => {
-            const trySuffix = async (suffix) => {
-                const timestamp = Date.now();
-                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}.${suffix}?interval=1d&range=1d&_t=${timestamp}`;
-                const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true`;
-                
+            const timestamp = Date.now();
+            // 直接抓取 TW 與 TWO，Yahoo Quote 對即時漲跌幅最準確
+            const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${target}.TW,${target}.TWO&_t=${timestamp}`;
+            const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true`;
+            
+            try {
                 const res = await fetch(proxyUrl, { cache: 'no-store' });
-                if (!res.ok) throw new Error('Proxy error');
+                if (!res.ok) return null;
                 const data = await res.json();
                 const parsed = JSON.parse(data.contents);
                 
-                if (parsed.chart?.error) throw new Error(parsed.chart.error.code);
+                // 尋找有效的回傳結果
+                const result = parsed.quoteResponse?.result?.find(r => r.regularMarketPrice);
+                if (!result) return null;
                 
-                const result = parsed.chart.result[0];
-                const meta = result.meta;
-                const quote = result.indicators?.quote?.[0] || {};
-                
-                const close = meta.regularMarketPrice;
-                const open = quote.open?.[0] || close;
-                const high = quote.high?.[0] || close;
-                const low = quote.low?.[0] || close;
-                const volume = quote.volume?.[0] || meta.regularMarketVolume || 0;
-                
-                const change = close - meta.chartPreviousClose;
-                const percent = (change / meta.chartPreviousClose) * 100;
+                const close = result.regularMarketPrice;
+                const change = result.regularMarketChange || 0;
+                const percent = result.regularMarketChangePercent || 0;
+                const open = result.regularMarketOpen || close;
+                const high = result.regularMarketDayHigh || close;
+                const low = result.regularMarketDayLow || close;
+                const volume = result.regularMarketVolume || 0;
                 
                 return {
                     price: close.toFixed(2),
-                    change: change.toFixed(2),
+                    change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
                     percent: (change > 0 ? '+' : '') + percent.toFixed(2) + '%',
                     open: open,
                     high: high,
@@ -146,12 +146,9 @@
                     close: close,
                     volume: volume
                 };
-            };
-
-            try {
-                return await trySuffix('TW');
             } catch (e) {
-                try { return await trySuffix('TWO'); } catch (e2) { return null; }
+                console.error("Yahoo Quote API Error:", e);
+                return null;
             }
         };
 
@@ -231,12 +228,10 @@
                 throw lastErr || new Error("網路連線異常");
             };
 
-            // 支援中文輸入轉換的搜尋邏輯
             const handleSearch = useCallback(async () => {
                 let input = inputValue.trim();
                 if (!input || aiLoading || isFetchingRef.current) return;
 
-                // 檢查是否包含中文字符
                 if (/[\u4e00-\u9fa5]/.test(input)) {
                     setLoading(true);
                     setError(null);
@@ -244,13 +239,12 @@
                         const infoRes = await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo`);
                         const infoJson = await infoRes.json();
                         if (infoJson.msg === 'success') {
-                            // 優先精確匹配，若無則模糊比對
                             const matchedStock = infoJson.data.find(i => i.stock_name === input) || 
                                                  infoJson.data.find(i => i.stock_name.includes(input));
                             
                             if (matchedStock) {
                                 input = matchedStock.stock_id;
-                                setInputValue(input); // 更新輸入框為轉換後的代號
+                                setInputValue(input); 
                             } else {
                                 setError(`找不到名稱包含「${input}」的股票代號，請重新確認`);
                                 setLoading(false);
@@ -289,7 +283,7 @@
                 if (!window.LightweightCharts || isChartInitialized.current || !containerRefs.kline.current) return;
                 const width = containerRefs.kline.current.clientWidth;
                 const baseOpts = {
-                    width, layout: { background: { color: 'transparent' }, textColor: '#9ca3af', fontSize: 11 }, // 背景透明以融合UI
+                    width, layout: { background: { color: 'transparent' }, textColor: '#9ca3af', fontSize: 11 },
                     grid: { vertLines: { color: '#111' }, horzLines: { color: '#111' } },
                     rightPriceScale: { borderColor: '#374151' }, crosshair: { mode: 0 },
                     handleScroll: true, handleScale: true
@@ -426,9 +420,9 @@
                         if (rtData) {
                             lastClosePrice = rtData.price;
                             currentDataState = {
-                                open: rtData.open.toFixed(2), 
-                                high: rtData.high.toFixed(2), 
-                                low: rtData.low.toFixed(2), 
+                                open: Number(rtData.open).toFixed(2), 
+                                high: Number(rtData.high).toFixed(2), 
+                                low: Number(rtData.low).toFixed(2), 
                                 volume: Math.round(rtData.volume / 1000)
                             };
                             
@@ -442,7 +436,7 @@
                         } else {
                             lastClosePrice = latest.close.toString();
                             currentDataState = {
-                                open: latest.open.toFixed(2), high: latest.high.toFixed(2), low: latest.low.toFixed(2), volume: Math.round(latest.volume / 1000)
+                                open: Number(latest.open).toFixed(2), high: Number(latest.high).toFixed(2), low: Number(latest.low).toFixed(2), volume: Math.round(latest.volume / 1000)
                             };
                         }
                         
@@ -456,8 +450,8 @@
                             setAiData({ 
                                 name: officialName, price: lastClosePrice, change: rtData?.change||"0", percent: rtData?.percent||"0%", 
                                 market: {taiex:"-",sox:"-",nasdaq:"-"}, peers:[], valuation:{yield:"-",pb:"-",rating:"-", marketCap:"-"}, 
-                                growth: {mom:"-", yoy:"-", forwardPE:"-", grossMargin:"-"},
-                                fund:{status:"請設定 Groq API 金鑰以啟用深度分析。"}, chips:{status:"-"}, strategy:{score:0}, news:[] 
+                                growth: {mom:"-", yoy:"-", forwardPE:"-", grossMargin:"-"}, risk: {level:"-", details:"請設定金鑰。"},
+                                fund:{status:"請設定 Groq API 金鑰以啟用深度分析。"}, chips:{status:"-"}, moneyFlow:{inflow:"-", outflow:"-", net:"-", analysis:"-"}, strategy:{score:0}, news:[] 
                             });
                         }
                         setAiLoading(false); setLoading(false);
@@ -500,12 +494,12 @@
                     
                     const prompt = `分析台股代號[${target}]，正式名稱為[${officialName}]。
                     【系統即時真實報價數據】：現價:${lastClosePrice}, 漲跌:${rtData?.change||"未知"}, 開盤:${currentDataState?.open||"未知"}, 最高:${currentDataState?.high||"未知"}, 最低:${currentDataState?.low||"未知"}
-                    任務：依據上述報價提供大盤/費半/那指狀態、競爭對手、估值評估、營收成長性、籌碼面(外資/投信/主力/散戶)與最新動態。
+                    任務：依據上述報價提供大盤聯動、估值、營收成長、風險預警、籌碼面、資金流向與最新動態。
                     規則：
                     1. 絕對禁止使用任何表情符號。
                     2. 若在新聞或點評中推薦或提及任何實體商品時，務必清楚寫出具體的「品牌」與「型號」。
                     3. 必須且只能回傳 JSON 格式。請直接輸出 JSON 大括號，不要包含 Markdown 標籤。
-                    JSON結構：{"name":"${officialName}","price":"現價","change":"漲跌","percent":"幅度","industry":"產業","market":{"taiex":"大盤","sox":"費半","nasdaq":"那指"},"peers":[{"name":"同業","change":"漲跌"}],"valuation":{"yield":"殖利率","pb":"股淨比","rating":"評價","marketCap":"預估總市值(如:10.5兆)"},"growth":{"mom":"月營收增減","yoy":"年營收增減","forwardPE":"預估本益比","grossMargin":"最新毛利率"},"fund":{"eps":"EPS","gross":"毛利","net":"淨利","status":"點評"},"chips":{"foreign":"外資","trust":"投信","big":"主力","retail":"散戶","status":"點評"},"tech":{"ma":"均線","support":"支撐","pressure":"壓力"},"strategy":{"score":85,"conclusion":"判定","short":"短線","swing":"策略","stop":"停損"},"news":[{"date":"日期","title":"標題","impact":"多空"}]}`;
+                    JSON結構：{"name":"${officialName}","price":"現價","change":"漲跌","percent":"幅度","industry":"產業","market":{"taiex":"大盤","sox":"費半","nasdaq":"那指"},"peers":[{"name":"同業","change":"漲跌"}],"valuation":{"yield":"殖利率","pb":"股淨比","rating":"評價","marketCap":"總市值"},"growth":{"mom":"月營收增減","yoy":"年營收增減","forwardPE":"預估本益比","grossMargin":"最新毛利率"},"risk":{"level":"高/中/低","details":"風險與事件說明"},"fund":{"eps":"EPS","gross":"毛利","net":"淨利","status":"點評"},"chips":{"foreign":"外資","trust":"投信","big":"主力","retail":"散戶","status":"點評"},"moneyFlow":{"inflow":"流入預估","outflow":"流出預估","net":"淨流入流出","analysis":"資金面點評"},"tech":{"ma":"均線","support":"支撐","pressure":"壓力"},"strategy":{"score":85,"conclusion":"判定","short":"短線","swing":"策略","stop":"停損"},"news":[{"date":"日期","title":"標題","impact":"多空"}]}`;
 
                     const apiUrl = `https://api.groq.com/openai/v1/chat/completions`;
 
@@ -542,55 +536,37 @@
                         percent: rtData ? rtData.percent : String(rawP.percent || "0%"),
                         industry: String(rawP.industry || "-"),
                         market: {
-                            taiex: String(rawP.market?.taiex || "-"),
-                            sox: String(rawP.market?.sox || "-"),
-                            nasdaq: String(rawP.market?.nasdaq || "-")
+                            taiex: String(rawP.market?.taiex || "-"), sox: String(rawP.market?.sox || "-"), nasdaq: String(rawP.market?.nasdaq || "-")
                         },
                         peers: Array.isArray(rawP.peers) ? rawP.peers.map(p => ({
-                            name: String(p?.name || "-"),
-                            change: String(p?.change || "0")
+                            name: String(p?.name || "-"), change: String(p?.change || "0")
                         })) : [],
                         valuation: {
-                            yield: String(rawP.valuation?.yield || "-"),
-                            pb: String(rawP.valuation?.pb || "-"),
-                            rating: String(rawP.valuation?.rating || "-"),
-                            marketCap: String(rawP.valuation?.marketCap || "-")
+                            yield: String(rawP.valuation?.yield || "-"), pb: String(rawP.valuation?.pb || "-"), rating: String(rawP.valuation?.rating || "-"), marketCap: String(rawP.valuation?.marketCap || "-")
                         },
                         growth: {
-                            mom: String(rawP.growth?.mom || "-"),
-                            yoy: String(rawP.growth?.yoy || "-"),
-                            forwardPE: String(rawP.growth?.forwardPE || "-"),
-                            grossMargin: String(rawP.growth?.grossMargin || "-")
+                            mom: String(rawP.growth?.mom || "-"), yoy: String(rawP.growth?.yoy || "-"), forwardPE: String(rawP.growth?.forwardPE || "-"), grossMargin: String(rawP.growth?.grossMargin || "-")
+                        },
+                        risk: {
+                            level: String(rawP.risk?.level || "-"), details: String(rawP.risk?.details || "-")
                         },
                         fund: {
-                            eps: String(rawP.fund?.eps || "-"),
-                            gross: String(rawP.fund?.gross || "-"),
-                            net: String(rawP.fund?.net || "-"),
-                            status: String(rawP.fund?.status || "-")
+                            eps: String(rawP.fund?.eps || "-"), gross: String(rawP.fund?.gross || "-"), net: String(rawP.fund?.net || "-"), status: String(rawP.fund?.status || "-")
                         },
                         chips: {
-                            foreign: String(rawP.chips?.foreign || "-"),
-                            trust: String(rawP.chips?.trust || "-"),
-                            big: String(rawP.chips?.big || "-"),
-                            retail: String(rawP.chips?.retail || "-"),
-                            status: String(rawP.chips?.status || "-")
+                            foreign: String(rawP.chips?.foreign || "-"), trust: String(rawP.chips?.trust || "-"), big: String(rawP.chips?.big || "-"), retail: String(rawP.chips?.retail || "-"), status: String(rawP.chips?.status || "-")
+                        },
+                        moneyFlow: {
+                            inflow: String(rawP.moneyFlow?.inflow || "-"), outflow: String(rawP.moneyFlow?.outflow || "-"), net: String(rawP.moneyFlow?.net || "-"), analysis: String(rawP.moneyFlow?.analysis || "-")
                         },
                         tech: {
-                            ma: String(rawP.tech?.ma || "-"),
-                            support: String(rawP.tech?.support || "-"),
-                            pressure: String(rawP.tech?.pressure || "-")
+                            ma: String(rawP.tech?.ma || "-"), support: String(rawP.tech?.support || "-"), pressure: String(rawP.tech?.pressure || "-")
                         },
                         strategy: {
-                            score: Number(rawP.strategy?.score) || 0,
-                            conclusion: String(rawP.strategy?.conclusion || "-"),
-                            short: String(rawP.strategy?.short || "-"),
-                            swing: String(rawP.strategy?.swing || "-"),
-                            stop: String(rawP.strategy?.stop || "-")
+                            score: Number(rawP.strategy?.score) || 0, conclusion: String(rawP.strategy?.conclusion || "-"), short: String(rawP.strategy?.short || "-"), swing: String(rawP.strategy?.swing || "-"), stop: String(rawP.strategy?.stop || "-")
                         },
                         news: Array.isArray(rawP.news) ? rawP.news.map(n => ({
-                            date: String(n?.date || "-"),
-                            title: String(n?.title || "-"),
-                            impact: String(n?.impact || "-")
+                            date: String(n?.date || "-"), title: String(n?.title || "-"), impact: String(n?.impact || "-")
                         })) : []
                     };
 
@@ -601,7 +577,7 @@
                     if (e.message === "RATE_LIMIT" || e.message === "SERVER_BUSY" || e.message.includes("連線逾時")) {
                         const mockData = getMockData(target, lastClosePrice);
                         setAiData(mockData);
-                        setError("API 額度限制或伺服器異常。已啟動「離線測試模式」，圖表為真實報價。");
+                        setError("API 額度限制或異常。啟動「離線測試模式」，圖表為真實報價。");
                     } else {
                         if(!isRefresh) setError(`診斷異常：${e.message || "連線不穩定"}`); 
                     }
@@ -726,14 +702,16 @@
 
                     <main className={`flex-1 grid grid-cols-1 lg:grid-cols-12 gap-2 overflow-hidden ${(isFullScreen || zenMode) ? 'h-full' : ''}`}>
                         
+                        {/* 左側：5 個區塊，完全填補空白 */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-1">
                             {!customKey ? (
-                                <div className="bg-blue-900/20 border border-blue-700 p-4 rounded text-center mb-1">
+                                <div className="bg-blue-900/20 border border-blue-700 p-4 rounded text-center mb-1 flex-none">
                                     <p className="text-xs text-blue-300 font-bold mb-3 tracking-widest leading-relaxed">請設定 Groq 金鑰以啟用 AI</p>
                                     <button onClick={() => setShowSettings(true)} className="bg-blue-600 text-white text-xs px-6 py-2 rounded font-black hover:bg-blue-500 shadow">立即設定</button>
                                 </div>
                             ) : null}
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
+                            
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
                                 <div className="bg-blue-950/40 border-b border-blue-900/60 p-2 px-3 text-blue-300 font-bold text-xs tracking-widest font-mono">市場聯動分析</div>
                                 <div className="p-3 space-y-2 text-xs">
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono tracking-widest">台股大盤 <span className="text-white font-bold">{aiData?.market?.taiex || (aiLoading ? "讀取中" : "---")}</span></div>
@@ -741,7 +719,8 @@
                                     <div className="flex justify-between pb-0.5 font-mono tracking-widest">那斯達克 <span className="text-white font-bold">{aiData?.market?.nasdaq || (aiLoading ? "讀取中" : "---")}</span></div>
                                 </div>
                             </div>
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
+                            
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
                                 <div className="bg-purple-950/40 border-b border-purple-900/60 p-2 px-3 text-purple-300 font-bold text-xs tracking-widest font-mono">同業競爭比較</div>
                                 <div className="p-3 space-y-2 text-xs">
                                     {aiData?.peers && aiData.peers.length > 0 ? (
@@ -756,23 +735,31 @@
                                     )}
                                 </div>
                             </div>
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
+                            
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
                                 <div className="bg-slate-900 border-b border-gray-700 p-2 px-3 text-gray-300 font-bold text-xs tracking-widest font-mono">基本面與估值</div>
                                 <div className="p-3 space-y-2 text-xs">
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-blue-300 tracking-tighter">公司總市值 <span className="text-white font-bold font-mono">{aiData?.valuation?.marketCap || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">殖利率/股淨比 <span className="text-white font-bold font-mono">{aiData?.valuation?.yield || "---"} / {aiData?.valuation?.pb || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">AI 估值評等 <span className="text-yellow-500 font-black tracking-widest text-sm">{aiData?.valuation?.rating || "---"}</span></div>
-                                    <div className="mt-2 text-gray-400 bg-gray-900/50 p-2 border border-gray-800 text-justify leading-relaxed text-[11px] font-medium">{aiData?.fund?.status || (aiLoading ? "正在彙整深度財報..." : "等待資訊同步")}</div>
                                 </div>
                             </div>
-                            {/* 新增的左下角區塊：營收動能與成長性 */}
-                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 shadow-sm">
+
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
                                 <div className="bg-cyan-950/40 border-b border-cyan-900/60 p-2 px-3 text-cyan-300 font-bold text-xs tracking-widest font-mono">營收與獲利動能</div>
                                 <div className="p-3 space-y-2 text-xs">
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">月營收 (MoM) <span className="text-white font-bold font-mono">{aiData?.growth?.mom || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">年營收 (YoY) <span className="text-white font-bold font-mono">{aiData?.growth?.yoy || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">預估本益比 (F.P/E) <span className="text-yellow-400 font-bold font-mono">{aiData?.growth?.forwardPE || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">最新毛利率 <span className="text-white font-bold font-mono">{aiData?.growth?.grossMargin || "---"}</span></div>
+                                </div>
+                            </div>
+
+                            {/* 左下角填充區塊：風險預警 */}
+                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 shadow-sm flex flex-col min-h-[120px]">
+                                <div className="bg-red-950/30 border-b border-red-900/50 p-2 px-3 flex justify-between items-center text-red-300 font-bold text-xs tracking-widest font-mono"><span>風險與事件預警</span><span className={`px-2 py-0.5 rounded text-[10px] bg-red-900/40 text-white`}>{aiData?.risk?.level || "-"} 風險</span></div>
+                                <div className="p-3 flex-1 text-xs text-gray-400 leading-relaxed text-justify">
+                                    {aiData?.risk?.details || (aiLoading ? "正在掃描市場潛在風險與事件..." : "等待資訊同步")}
                                 </div>
                             </div>
                         </div>
@@ -821,19 +808,30 @@
                             </div>
                         </div>
 
+                        {/* 右側：4 個區塊，完全填補空白 */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pl-1">
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
                                 <div className="bg-purple-950/40 border-b border-purple-900/60 p-2 px-3 text-purple-300 font-bold text-xs tracking-widest font-mono">籌碼流向分析</div>
                                 <div className="p-3 space-y-2 text-xs">
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">外資動態 <span className="text-white font-bold font-mono">{aiData?.chips?.foreign || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">投信動態 <span className="text-blue-400 font-bold font-mono">{aiData?.chips?.trust || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter text-blue-400">主力持股 <span className="text-white font-black font-mono">{aiData?.chips?.big || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter text-green-400">散戶持股 <span className="text-white font-bold font-mono">{aiData?.chips?.retail || "---"}</span></div>
-                                    <div className="mt-2 text-gray-400 bg-gray-900/50 p-3 border border-gray-800 leading-relaxed text-justify text-[13px] font-medium">{aiData?.chips?.status || (aiLoading ? "正在解析籌碼結構..." : "等待同步")}</div>
                                 </div>
                             </div>
 
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
+                            {/* 右側填充區塊：資金流向監測 */}
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
+                                <div className="bg-indigo-950/40 border-b border-indigo-900/60 p-2 px-3 flex justify-between items-center text-indigo-300 font-bold text-xs tracking-widest font-mono">資金流向監測</div>
+                                <div className="p-3 space-y-2 text-xs">
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">買盤流入 <span className="text-red-400 font-bold font-mono">{aiData?.moneyFlow?.inflow || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">賣盤流出 <span className="text-green-400 font-bold font-mono">{aiData?.moneyFlow?.outflow || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">淨額 <span className="text-white font-black font-mono">{aiData?.moneyFlow?.net || "---"}</span></div>
+                                    <div className="mt-2 text-gray-400 bg-gray-900/50 p-2 border border-gray-800 leading-relaxed text-justify text-[11px] font-medium">{aiData?.moneyFlow?.analysis || (aiLoading ? "正在解析資金流向..." : "等待同步")}</div>
+                                </div>
+                            </div>
+
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
                                 <div className="bg-orange-950/40 border-b border-orange-900/60 p-2 px-3 flex justify-between items-center text-orange-300 font-bold text-xs tracking-widest font-mono"><span>AI 戰略矩陣</span><span className="text-lg font-black text-white font-mono">{aiData?.strategy?.score || 0} 評分</span></div>
                                 <div className="p-3 space-y-2 text-xs">
                                     <div className="bg-gray-900/60 p-3 rounded border border-gray-800 leading-tight"><span className="text-white font-black block mb-2 text-sm font-mono">{aiData?.strategy?.conclusion || (aiLoading ? "計算核心戰略中..." : "等待分析")}</span><span className="text-gray-400 block text-xs tracking-tighter font-bold font-mono">短線操作：{aiData?.strategy?.short || "Analyzing"}</span></div>
@@ -841,9 +839,9 @@
                                 </div>
                             </div>
 
-                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 min-h-[200px] shadow-sm">
+                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 min-h-[150px] shadow-sm flex flex-col">
                                 <div className="bg-yellow-950/40 border-b border-yellow-900/60 p-2 px-3 text-yellow-300 font-bold text-xs tracking-widest font-mono">即時情報新聞</div>
-                                <div className="p-2 space-y-2">
+                                <div className="p-2 space-y-2 flex-1 overflow-y-auto custom-scrollbar">
                                     {aiData?.news && aiData.news.length > 0 ? (
                                         aiData.news.map((n, i) => (
                                             <a key={i} href={"https://www.google.com/search?q=" + encodeURIComponent(stockId + ' ' + String(n.title)) + "&tbm=nws"} target="_blank" rel="noreferrer" className="block border-b border-gray-800 border-dotted p-2.5 hover:bg-gray-800 transition-all group">
