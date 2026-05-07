@@ -98,6 +98,7 @@
             market: { taiex: "測試數據", sox: "測試數據", nasdaq: "測試數據" },
             peers: [{ name: "模擬對手A", change: "+1.2%" }, { name: "模擬對手B", change: "-0.5%" }],
             valuation: { yield: "---", pb: "---", rating: "測試評估", marketCap: "---" },
+            growth: { mom: "-1.5%", yoy: "+12.4%", forwardPE: "15.2", grossMargin: "35.6%" },
             fund: { eps: "---", gross: "---", net: "---", status: "由於 API 額度耗盡或網路異常，目前啟動「離線測試模式」。圖表為真實台股報價，但此處文字分析皆為系統虛擬生成，僅供測試介面排版使用。" },
             chips: { foreign: "模擬", trust: "模擬", big: "模擬", retail: "模擬", status: "籌碼資料模擬中。請等待 API 額度恢復後再重新整理取得真實數據。" },
             tech: { ma: "均線模擬", support: "---", pressure: "---" },
@@ -452,7 +453,12 @@
                     const cleanKey = customKey ? customKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '') : "";
                     if (!cleanKey) {
                         if(!isRefresh) {
-                            setAiData({ name: officialName, price: lastClosePrice, change: rtData?.change||"0", percent: rtData?.percent||"0%", market: {taiex:"-",sox:"-",nasdaq:"-"}, peers:[], valuation:{yield:"-",pb:"-",rating:"-", marketCap:"-"}, fund:{status:"請設定 Groq API 金鑰以啟用深度分析。"}, chips:{status:"-"}, strategy:{score:0}, news:[] });
+                            setAiData({ 
+                                name: officialName, price: lastClosePrice, change: rtData?.change||"0", percent: rtData?.percent||"0%", 
+                                market: {taiex:"-",sox:"-",nasdaq:"-"}, peers:[], valuation:{yield:"-",pb:"-",rating:"-", marketCap:"-"}, 
+                                growth: {mom:"-", yoy:"-", forwardPE:"-", grossMargin:"-"},
+                                fund:{status:"請設定 Groq API 金鑰以啟用深度分析。"}, chips:{status:"-"}, strategy:{score:0}, news:[] 
+                            });
                         }
                         setAiLoading(false); setLoading(false);
                         isFetchingRef.current = false;
@@ -494,12 +500,12 @@
                     
                     const prompt = `分析台股代號[${target}]，正式名稱為[${officialName}]。
                     【系統即時真實報價數據】：現價:${lastClosePrice}, 漲跌:${rtData?.change||"未知"}, 開盤:${currentDataState?.open||"未知"}, 最高:${currentDataState?.high||"未知"}, 最低:${currentDataState?.low||"未知"}
-                    任務：依據上述報價提供大盤/費半/那指狀態、競爭對手、估值評估、籌碼面(外資/投信/主力/散戶)與最新動態。
+                    任務：依據上述報價提供大盤/費半/那指狀態、競爭對手、估值評估、營收成長性、籌碼面(外資/投信/主力/散戶)與最新動態。
                     規則：
                     1. 絕對禁止使用任何表情符號。
                     2. 若在新聞或點評中推薦或提及任何實體商品時，務必清楚寫出具體的「品牌」與「型號」。
                     3. 必須且只能回傳 JSON 格式。請直接輸出 JSON 大括號，不要包含 Markdown 標籤。
-                    JSON結構：{"name":"${officialName}","price":"現價","change":"漲跌","percent":"幅度","industry":"產業","market":{"taiex":"大盤","sox":"費半","nasdaq":"那指"},"peers":[{"name":"同業","change":"漲跌"}],"valuation":{"yield":"殖利率","pb":"股淨比","rating":"評價","marketCap":"預估總市值(如:10.5兆)"},"fund":{"eps":"EPS","gross":"毛利","net":"淨利","status":"點評"},"chips":{"foreign":"外資","trust":"投信","big":"主力","retail":"散戶","status":"點評"},"tech":{"ma":"均線","support":"支撐","pressure":"壓力"},"strategy":{"score":85,"conclusion":"判定","short":"短線","swing":"策略","stop":"停損"},"news":[{"date":"日期","title":"標題","impact":"多空"}]}`;
+                    JSON結構：{"name":"${officialName}","price":"現價","change":"漲跌","percent":"幅度","industry":"產業","market":{"taiex":"大盤","sox":"費半","nasdaq":"那指"},"peers":[{"name":"同業","change":"漲跌"}],"valuation":{"yield":"殖利率","pb":"股淨比","rating":"評價","marketCap":"預估總市值(如:10.5兆)"},"growth":{"mom":"月營收增減","yoy":"年營收增減","forwardPE":"預估本益比","grossMargin":"最新毛利率"},"fund":{"eps":"EPS","gross":"毛利","net":"淨利","status":"點評"},"chips":{"foreign":"外資","trust":"投信","big":"主力","retail":"散戶","status":"點評"},"tech":{"ma":"均線","support":"支撐","pressure":"壓力"},"strategy":{"score":85,"conclusion":"判定","short":"短線","swing":"策略","stop":"停損"},"news":[{"date":"日期","title":"標題","impact":"多空"}]}`;
 
                     const apiUrl = `https://api.groq.com/openai/v1/chat/completions`;
 
@@ -549,6 +555,12 @@
                             pb: String(rawP.valuation?.pb || "-"),
                             rating: String(rawP.valuation?.rating || "-"),
                             marketCap: String(rawP.valuation?.marketCap || "-")
+                        },
+                        growth: {
+                            mom: String(rawP.growth?.mom || "-"),
+                            yoy: String(rawP.growth?.yoy || "-"),
+                            forwardPE: String(rawP.growth?.forwardPE || "-"),
+                            grossMargin: String(rawP.growth?.grossMargin || "-")
                         },
                         fund: {
                             eps: String(rawP.fund?.eps || "-"),
@@ -744,13 +756,23 @@
                                     )}
                                 </div>
                             </div>
-                            <div className="bg-[#050505] border border-gray-800 rounded flex-1">
+                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm">
                                 <div className="bg-slate-900 border-b border-gray-700 p-2 px-3 text-gray-300 font-bold text-xs tracking-widest font-mono">基本面與估值</div>
                                 <div className="p-3 space-y-2 text-xs">
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-blue-300 tracking-tighter">公司總市值 <span className="text-white font-bold font-mono">{aiData?.valuation?.marketCap || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">殖利率/股淨比 <span className="text-white font-bold font-mono">{aiData?.valuation?.yield || "---"} / {aiData?.valuation?.pb || "---"}</span></div>
                                     <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">AI 估值評等 <span className="text-yellow-500 font-black tracking-widest text-sm">{aiData?.valuation?.rating || "---"}</span></div>
-                                    <div className="mt-2 text-gray-400 bg-gray-900/50 p-3 border border-gray-800 text-justify leading-relaxed text-[13px] font-medium">{aiData?.fund?.status || (aiLoading ? "正在彙整深度財報..." : "等待資訊同步")}</div>
+                                    <div className="mt-2 text-gray-400 bg-gray-900/50 p-2 border border-gray-800 text-justify leading-relaxed text-[11px] font-medium">{aiData?.fund?.status || (aiLoading ? "正在彙整深度財報..." : "等待資訊同步")}</div>
+                                </div>
+                            </div>
+                            {/* 新增的左下角區塊：營收動能與成長性 */}
+                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 shadow-sm">
+                                <div className="bg-cyan-950/40 border-b border-cyan-900/60 p-2 px-3 text-cyan-300 font-bold text-xs tracking-widest font-mono">營收與獲利動能</div>
+                                <div className="p-3 space-y-2 text-xs">
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">月營收 (MoM) <span className="text-white font-bold font-mono">{aiData?.growth?.mom || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">年營收 (YoY) <span className="text-white font-bold font-mono">{aiData?.growth?.yoy || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">預估本益比 (F.P/E) <span className="text-yellow-400 font-bold font-mono">{aiData?.growth?.forwardPE || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">最新毛利率 <span className="text-white font-bold font-mono">{aiData?.growth?.grossMargin || "---"}</span></div>
                                 </div>
                             </div>
                         </div>
