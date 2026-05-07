@@ -11,18 +11,47 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     <style>
-        body { background-color: #000; margin: 0; padding: 0; color: #d1d5db; overflow: hidden; height: 100vh; }
+        body { background-color: #050505; margin: 0; padding: 0; color: #d1d5db; overflow: hidden; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
         #root { height: 100%; width: 100%; }
-        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #000; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+        
+        /* 訂製滾動條 */
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
-        * { scrollbar-width: thin; scrollbar-color: #333 #000; }
-        :-webkit-full-screen { background-color: #000; }
-        .glass-panel { background: rgba(10, 10, 10, 0.98); backdrop-filter: blur(20px); border: 1px solid #333; }
-        .terminal-border { border: 1px solid #1f2937; }
-        .loading-shimmer { background: linear-gradient(90deg, #050505 25%, #111 50%, #050505 75%); background-size: 200% 100%; animation: shimmer 2s infinite linear; }
-        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+        * { scrollbar-width: thin; scrollbar-color: #333 transparent; }
+        
+        /* 動畫定義 */
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes pulseGlow {
+            0%, 100% { box-shadow: 0 0 10px rgba(59, 130, 246, 0.1); }
+            50% { box-shadow: 0 0 20px rgba(59, 130, 246, 0.3); }
+        }
+        @keyframes shimmer { 
+            0% { background-position: 200% 0; } 100% { background-position: -200% 0; } 
+        }
+
+        /* 動畫類別 */
+        .animate-fade-up { opacity: 0; animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .delay-100 { animation-delay: 100ms; }
+        .delay-200 { animation-delay: 200ms; }
+        .delay-300 { animation-delay: 300ms; }
+        .delay-400 { animation-delay: 400ms; }
+        .header-glow { animation: pulseGlow 3s infinite; }
+        
+        .loading-shimmer { 
+            background: linear-gradient(90deg, rgba(255,255,255,0.03) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.03) 75%); 
+            background-size: 200% 100%; 
+            animation: shimmer 2s infinite linear; 
+        }
+        
+        /* 玻璃面板 */
+        .glass-panel { background: rgba(10, 10, 10, 0.95); backdrop-filter: blur(16px); border: 1px solid rgba(255,255,255,0.08); }
+        .panel-card { background-color: #0a0a0a; border: 1px solid rgba(255,255,255,0.05); border-radius: 0.75rem; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5); transition: transform 0.2s, box-shadow 0.2s; }
+        .panel-card:hover { border-color: rgba(255,255,255,0.1); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); }
     </style>
 </head>
 <body>
@@ -111,45 +140,57 @@
             ]
         });
 
-        // 終極修復：改用 Yahoo Quote 端點，徹底解決漲跌幅與昨收價格錯誤的問題
+        // 加入多重 Proxy 備援機制，解決 NetworkError 阻擋問題
         const fetchRealTimeYahoo = async (target) => {
             const timestamp = Date.now();
-            // 直接抓取 TW 與 TWO，Yahoo Quote 對即時漲跌幅最準確
             const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${target}.TW,${target}.TWO&_t=${timestamp}`;
-            const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true`;
-            
-            try {
-                const res = await fetch(proxyUrl, { cache: 'no-store' });
-                if (!res.ok) return null;
-                const data = await res.json();
-                const parsed = JSON.parse(data.contents);
-                
-                // 尋找有效的回傳結果
-                const result = parsed.quoteResponse?.result?.find(r => r.regularMarketPrice);
-                if (!result) return null;
-                
-                const close = result.regularMarketPrice;
-                const change = result.regularMarketChange || 0;
-                const percent = result.regularMarketChangePercent || 0;
-                const open = result.regularMarketOpen || close;
-                const high = result.regularMarketDayHigh || close;
-                const low = result.regularMarketDayLow || close;
-                const volume = result.regularMarketVolume || 0;
-                
-                return {
-                    price: close.toFixed(2),
-                    change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
-                    percent: (change > 0 ? '+' : '') + percent.toFixed(2) + '%',
-                    open: open,
-                    high: high,
-                    low: low,
-                    close: close,
-                    volume: volume
-                };
-            } catch (e) {
-                console.error("Yahoo Quote API Error:", e);
-                return null;
+
+            const proxies = [
+                { url: `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true`, type: 'wrapped' },
+                { url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, type: 'direct' },
+                { url: `https://corsproxy.io/?${encodeURIComponent(url)}`, type: 'direct' }
+            ];
+
+            for (const proxy of proxies) {
+                try {
+                    const res = await fetch(proxy.url, { cache: 'no-store' });
+                    if (!res.ok) continue;
+
+                    let parsed;
+                    if (proxy.type === 'wrapped') {
+                        const data = await res.json();
+                        if (!data.contents) continue;
+                        parsed = JSON.parse(data.contents);
+                    } else {
+                        parsed = await res.json();
+                    }
+
+                    const result = parsed.quoteResponse?.result?.find(r => r.regularMarketPrice);
+                    if (!result) continue; 
+                    
+                    const close = result.regularMarketPrice;
+                    const change = result.regularMarketChange || 0;
+                    const percent = result.regularMarketChangePercent || 0;
+                    const open = result.regularMarketOpen || close;
+                    const high = result.regularMarketDayHigh || close;
+                    const low = result.regularMarketDayLow || close;
+                    const volume = result.regularMarketVolume || 0;
+                    
+                    return {
+                        price: close.toFixed(2),
+                        change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
+                        percent: (change > 0 ? '+' : '') + percent.toFixed(2) + '%',
+                        open: open,
+                        high: high,
+                        low: low,
+                        close: close,
+                        volume: volume
+                    };
+                } catch (e) {
+                    console.warn(`Proxy Failed (${proxy.url}):`, e.message);
+                }
             }
+            return null; 
         };
 
         const fetchWithTimeout = async (url, options = {}, timeout = 30000) => {
@@ -182,6 +223,7 @@
             const [isFullScreen, setIsFullScreen] = useState(false);
             const [zenMode, setZenMode] = useState(false);
             const [showSettings, setShowSettings] = useState(false);
+            const [animationKey, setAnimationKey] = useState(0); // 用於觸發重新載入的動畫
 
             const rootRef = useRef(null);
             const chartRefs = useRef({});
@@ -206,7 +248,7 @@
                         }
 
                         if (res.status === 401 || res.status === 403) throw new Error("驗證失敗，請確認 Groq 金鑰是否有效");
-                        if (res.status === 404) throw new Error("模型端點無法存取，請確認模型名稱");
+                        if (res.status === 404) throw new Error("模型端點無法存取");
                         if (res.status === 429) throw new Error("RATE_LIMIT");
 
                         if (res.status >= 500) {
@@ -228,6 +270,7 @@
                 throw lastErr || new Error("網路連線異常");
             };
 
+            // 支援中文輸入轉換的搜尋邏輯
             const handleSearch = useCallback(async () => {
                 let input = inputValue.trim();
                 if (!input || aiLoading || isFetchingRef.current) return;
@@ -258,6 +301,7 @@
                     }
                 }
                 
+                setAnimationKey(prev => prev + 1); // 觸發動畫
                 setStockId(input.toUpperCase());
             }, [inputValue, aiLoading]);
 
@@ -265,7 +309,7 @@
                 if (!document.fullscreenElement) {
                     if (rootRef.current) {
                         rootRef.current.requestFullscreen().catch(err => {
-                            console.error(`Error attempting to enable full-screen mode: ${err.message}`);
+                            console.error(`全螢幕失敗: ${err.message}`);
                         });
                     }
                 } else {
@@ -279,36 +323,39 @@
                 return () => document.removeEventListener('fullscreenchange', fn);
             }, []);
 
+            // 圖表初始化 (優化排版)
             const initCharts = useCallback(() => {
                 if (!window.LightweightCharts || isChartInitialized.current || !containerRefs.kline.current) return;
                 const width = containerRefs.kline.current.clientWidth;
                 const baseOpts = {
                     width, layout: { background: { color: 'transparent' }, textColor: '#9ca3af', fontSize: 11 },
-                    grid: { vertLines: { color: '#111' }, horzLines: { color: '#111' } },
-                    rightPriceScale: { borderColor: '#374151' }, crosshair: { mode: 0 },
+                    grid: { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
+                    rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' }, crosshair: { mode: 0 },
                     handleScroll: true, handleScale: true
                 };
                 
-                const h = (isFullScreen || zenMode) ? 500 : 320;
+                const h = (isFullScreen || zenMode) ? 500 : 340;
 
-                const kChart = window.LightweightCharts.createChart(containerRefs.kline.current, { ...baseOpts, height: h, timeScale: { borderColor: '#374151', fixRightEdge: true, rightOffset: 5 } });
+                // 主圖
+                const kChart = window.LightweightCharts.createChart(containerRefs.kline.current, { ...baseOpts, height: h, timeScale: { borderColor: 'rgba(255,255,255,0.1)', fixRightEdge: true, rightOffset: 5 } });
                 const kSeries = kChart.addCandlestickSeries({ upColor: '#ef4444', downColor: '#22c55e', borderVisible: false, wickUpColor: '#ef4444', wickDownColor: '#22c55e' });
                 const ma5Series = kChart.addLineSeries({ color: '#facc15', lineWidth: 1.5 });
                 const ma20Series = kChart.addLineSeries({ color: '#60a5fa', lineWidth: 1.5 });
                 const ma60Series = kChart.addLineSeries({ color: '#4ade80', lineWidth: 1.5 });
                 
-                const vChart = window.LightweightCharts.createChart(containerRefs.vol.current, { ...baseOpts, height: 70, timeScale: { visible: false, fixRightEdge: true } });
+                // 附圖
+                const vChart = window.LightweightCharts.createChart(containerRefs.vol.current, { ...baseOpts, height: 80, timeScale: { visible: false, fixRightEdge: true } });
                 const vSeries = vChart.addHistogramSeries({ color: '#3b82f6', priceFormat: { type: 'volume' } });
                 
-                const mChart = window.LightweightCharts.createChart(containerRefs.macd.current, { ...baseOpts, height: 90, timeScale: { visible: false, fixRightEdge: true } });
-                const mDif = mChart.addLineSeries({ color: '#facc15', lineWidth: 1 });
-                const mDea = mChart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
+                const mChart = window.LightweightCharts.createChart(containerRefs.macd.current, { ...baseOpts, height: 100, timeScale: { visible: false, fixRightEdge: true } });
+                const mDif = mChart.addLineSeries({ color: '#facc15', lineWidth: 1.5 });
+                const mDea = mChart.addLineSeries({ color: '#60a5fa', lineWidth: 1.5 });
                 const mHist = mChart.addHistogramSeries();
                 
-                const kjChart = window.LightweightCharts.createChart(containerRefs.kdj.current, { ...baseOpts, height: 90, timeScale: { borderColor: '#374151', fixRightEdge: true } });
-                const kjK = kjChart.addLineSeries({ color: '#f8fafc', lineWidth: 1 });
-                const kjD = kjChart.addLineSeries({ color: '#facc15', lineWidth: 1 });
-                const kjJ = kjChart.addLineSeries({ color: '#d946ef', lineWidth: 1 });
+                const kjChart = window.LightweightCharts.createChart(containerRefs.kdj.current, { ...baseOpts, height: 100, timeScale: { borderColor: 'rgba(255,255,255,0.1)', fixRightEdge: true } });
+                const kjK = kjChart.addLineSeries({ color: '#f8fafc', lineWidth: 1.5 });
+                const kjD = kjChart.addLineSeries({ color: '#facc15', lineWidth: 1.5 });
+                const kjJ = kjChart.addLineSeries({ color: '#d946ef', lineWidth: 1.5 });
 
                 chartRefs.current = { kChart, vChart, mChart, kjChart };
                 seriesRefs.current = { kSeries, ma5Series, ma20Series, ma60Series, vSeries, macdDifSeries: mDif, macdDeaSeries: mDea, macdHistSeries: mHist, kdjKSeries: kjK, kdjDSeries: kjD, kdjJSeries: kjJ };
@@ -327,7 +374,7 @@
             useEffect(() => {
                 if (isChartInitialized.current && chartRefs.current.kChart) {
                     const isLarge = isFullScreen || zenMode;
-                    chartRefs.current.kChart.applyOptions({ height: isLarge ? 500 : 320 });
+                    chartRefs.current.kChart.applyOptions({ height: isLarge ? 500 : 340 });
                 }
             }, [isFullScreen, zenMode]);
 
@@ -363,7 +410,7 @@
                 s.ma5Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma5[i] })));
                 s.ma20Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma20[i] })));
                 s.ma60Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma60[i] })));
-                s.vSeries.setData(sorted.map(data => ({ time: data.time, value: data.volume, color: data.close >= data.open ? 'rgba(239, 68, 68, 0.6)' : 'rgba(34, 197, 94, 0.6)' })));
+                s.vSeries.setData(sorted.map(data => ({ time: data.time, value: data.volume, color: data.close >= data.open ? 'rgba(239, 68, 68, 0.9)' : 'rgba(34, 197, 94, 0.9)' })));
                 s.macdDifSeries.setData(sorted.map((d, i) => ({ time: d.time, value: dif[i] || 0 })));
                 s.macdDeaSeries.setData(sorted.map((d, i) => ({ time: d.time, value: dea[i] || 0 })));
                 s.macdHistSeries.setData(sorted.map((d, i) => ({ time: d.time, value: macd[i] || 0, color: macd[i] >= 0 ? '#ef4444' : '#22c55e' })));
@@ -412,7 +459,7 @@
                     }
 
                     let rtData = null;
-                    try { rtData = await fetchRealTimeYahoo(target); } catch(e) { console.error("Yahoo API failed:", e); }
+                    try { rtData = await fetchRealTimeYahoo(target); } catch(e) {}
 
                     if (historyCache.length > 0) {
                         const latest = historyCache[historyCache.length-1];
@@ -608,262 +655,252 @@
             const isUp = aiData?.change && !String(aiData.change).includes('-');
             const priceColor = !aiData?.change || String(aiData.change) === '0' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
             
-            const zenClass = zenMode ? "fixed inset-0 z-[9999] bg-black p-2 lg:p-4" : "";
+            const zenClass = zenMode ? "fixed inset-0 z-[9999] bg-[#050505] p-2 lg:p-4" : "";
             const headerStatus = aiData?.name || (aiLoading ? '系統分析處理中' : '等待輸入指令');
-
             const disableInput = aiLoading;
 
             return (
-                <div ref={rootRef} className={`min-h-screen bg-black text-gray-200 font-sans p-1 lg:p-2 overflow-hidden flex flex-col ${zenClass}`}>
+                <div key={animationKey} ref={rootRef} className={`min-h-screen bg-[#050505] text-gray-200 font-sans p-2 lg:p-3 overflow-hidden flex flex-col ${zenClass}`}>
                     
-                    <header className="flex-none flex flex-col md:flex-row justify-between items-center mb-2 bg-[#0a0a0a] p-2 lg:p-3 border border-gray-800 rounded shadow-sm">
-                        <div className="flex flex-col lg:flex-row lg:items-center gap-3 w-full lg:w-auto">
-                            <div className="flex items-center gap-3">
+                    <header className="flex-none flex flex-col md:flex-row justify-between items-center mb-3 bg-[#0a0a0a] p-3 lg:p-4 border border-white/5 rounded-xl shadow-[0_4px_20px_rgba(0,0,0,0.5)] relative header-glow">
+                        <div className="flex flex-col lg:flex-row lg:items-center gap-4 w-full lg:w-auto">
+                            <div className="flex items-center gap-4">
                                 <div className="flex flex-col">
-                                    <h1 className="text-lg font-bold text-white tracking-tighter">{headerStatus}</h1>
-                                    <span className="text-blue-500 font-mono text-xs uppercase tracking-widest">{stockId}</span>
+                                    <h1 className="text-xl font-bold text-white tracking-tighter">{headerStatus}</h1>
+                                    <span className="text-blue-500 font-mono text-sm uppercase tracking-widest">{stockId}</span>
                                 </div>
-                                <div className="h-6 w-px bg-gray-700 mx-2 hidden lg:block"></div>
-                                <div className="flex items-baseline gap-2">
-                                    <span className={`text-3xl font-black font-mono tracking-tighter ${priceColor}`}>{aiData ? aiData.price : '---'}</span>
-                                    <div className="flex flex-col text-xs font-bold font-mono">
+                                <div className="h-8 w-px bg-white/10 mx-2 hidden lg:block"></div>
+                                <div className="flex items-baseline gap-3">
+                                    <span className={`text-4xl font-black font-mono tracking-tighter ${priceColor}`}>{aiData ? aiData.price : '---'}</span>
+                                    <div className="flex flex-col text-sm font-bold font-mono">
                                         <span className={priceColor}>{aiData ? aiData.change : ''}</span>
                                         <span className={priceColor}>{aiData ? aiData.percent : ''}</span>
                                     </div>
                                 </div>
                             </div>
                             
-                            <div className="flex flex-wrap gap-4 text-[10px] lg:text-xs font-mono text-gray-400 lg:ml-6 bg-gray-900/50 p-2 rounded border border-gray-800">
+                            <div className="flex flex-wrap gap-5 text-[11px] lg:text-xs font-mono text-gray-400 lg:ml-6 bg-black/40 p-2.5 rounded-lg border border-white/5 shadow-inner">
                                 <div>開盤 <span className="text-white font-bold">{stockDetails.open || '---'}</span></div>
                                 <div>最高 <span className="text-red-400 font-bold">{stockDetails.high || '---'}</span></div>
                                 <div>最低 <span className="text-green-400 font-bold">{stockDetails.low || '---'}</span></div>
                                 <div>總量 <span className="text-yellow-400 font-bold">{stockDetails.volume || '0'}</span> 張</div>
-                                <div className="text-[9px] text-gray-600 flex items-center ml-2 border-l border-gray-700 pl-2">即時盤中資料</div>
+                                <div className="text-[10px] text-gray-500 flex items-center ml-2 border-l border-white/10 pl-3">即時盤中連線</div>
                             </div>
                         </div>
 
-                        <div className="flex items-center gap-2 mt-3 md:mt-0 w-full lg:w-auto justify-end">
-                            {aiLoading ? <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mr-1"></div> : null}
+                        <div className="flex items-center gap-2 mt-4 md:mt-0 w-full lg:w-auto justify-end">
+                            {aiLoading ? <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mr-2"></div> : null}
                             <input 
                                 type="text" 
                                 value={inputValue} 
                                 onChange={e => setInputValue(e.target.value)} 
                                 onKeyDown={e => { if (e.key === 'Enter') handleSearch(); }} 
-                                placeholder="輸入名稱或代號" 
+                                placeholder="輸入名稱 (如: 台積電) 或 代號" 
                                 disabled={disableInput}
-                                className="w-32 lg:w-36 bg-[#111] border border-gray-700 px-2 py-1.5 text-xs font-bold rounded text-white focus:border-blue-600 outline-none transition-all disabled:opacity-50 disabled:cursor-not-allowed" 
+                                className="w-56 bg-[#111] border border-white/10 px-3 py-2 text-xs font-bold rounded-lg text-white focus:border-blue-500 outline-none transition-all disabled:opacity-50 shadow-inner" 
                             />
-                            <button onClick={handleSearch} disabled={disableInput} className="bg-blue-900/60 border border-blue-700 px-3 py-1.5 text-xs font-bold rounded hover:bg-blue-800 transition-all uppercase tracking-widest disabled:opacity-50 disabled:cursor-not-allowed">
+                            <button onClick={handleSearch} disabled={disableInput} className="bg-blue-600/80 border border-blue-500 px-4 py-2 text-xs font-bold rounded-lg hover:bg-blue-600 transition-all uppercase tracking-widest disabled:opacity-50 shadow-lg shadow-blue-900/20">
                                 查詢
                             </button>
-                            <button onClick={() => setShowSettings(!showSettings)} disabled={aiLoading} className="bg-gray-800 border border-gray-600 px-3 py-1.5 text-xs font-bold rounded hover:bg-gray-700 transition-all uppercase tracking-widest disabled:opacity-50">設定</button>
-                            <button onClick={toggleFullScreen} className={`border px-3 py-1.5 text-xs font-black rounded transition-all uppercase tracking-widest ${zenMode || isFullScreen ? 'bg-red-900/40 border-red-700 text-red-200' : 'bg-blue-900/40 border-blue-700 text-blue-200 hover:bg-blue-800/60'}`}>
-                                {isFullScreen || zenMode ? '退出' : '全螢幕'}
+                            <button onClick={() => setShowSettings(!showSettings)} disabled={aiLoading} className="bg-gray-800 border border-white/10 px-4 py-2 text-xs font-bold rounded-lg hover:bg-gray-700 transition-all uppercase tracking-widest disabled:opacity-50">設定</button>
+                            <button onClick={toggleFullScreen} className={`border px-4 py-2 text-xs font-black rounded-lg transition-all uppercase tracking-widest ${zenMode || isFullScreen ? 'bg-red-900/40 border-red-700 text-red-200 hover:bg-red-800/60' : 'bg-transparent border-white/10 text-gray-300 hover:bg-white/5'}`}>
+                                {isFullScreen || zenMode ? '退出全螢幕' : '全螢幕'}
                             </button>
                         </div>
                     </header>
 
                     {showSettings ? (
-                        <div className="absolute top-16 right-4 z-[100] w-[360px] p-5 glass-panel border border-gray-700 rounded shadow-2xl">
-                            <h3 className="text-base font-bold mb-4 border-b border-gray-800 pb-2 text-blue-400">Groq 核心連線配置</h3>
-                            <div className="space-y-4">
+                        <div className="absolute top-20 right-6 z-[100] w-[380px] p-6 glass-panel border border-white/10 rounded-2xl shadow-[0_10px_40px_rgba(0,0,0,0.8)]">
+                            <h3 className="text-base font-bold mb-5 border-b border-gray-800 pb-3 text-blue-400">系統核心配置</h3>
+                            <div className="space-y-5">
                                 <div>
                                     <label className="text-xs block text-gray-400 mb-2 font-bold tracking-widest font-mono">Groq API Key (gsk_ 開頭)</label>
-                                    <input type="password" value={customKey} onChange={e => setCustomKey(e.target.value)} className="w-full bg-black border border-gray-600 p-2 text-xs rounded focus:border-blue-500 outline-none font-mono" placeholder="貼入 API 金鑰" />
+                                    <input type="password" value={customKey} onChange={e => setCustomKey(e.target.value)} className="w-full bg-black border border-gray-700 p-2.5 text-xs rounded-lg focus:border-blue-500 outline-none font-mono" placeholder="貼入 API 金鑰" />
                                 </div>
                                 <div>
                                     <label className="text-xs block text-gray-400 mb-2 font-bold tracking-widest font-mono">AI 運算模型配置</label>
-                                    <select value={aiModel} onChange={e => setAiModel(e.target.value)} className="w-full bg-black border border-gray-600 p-2 text-xs rounded focus:border-blue-500 outline-none font-mono text-gray-200">
+                                    <select value={aiModel} onChange={e => setAiModel(e.target.value)} className="w-full bg-black border border-gray-700 p-2.5 text-xs rounded-lg focus:border-blue-500 outline-none font-mono text-gray-200">
                                         <option value="llama-3.3-70b-versatile">Llama 3.3 70B (推薦/邏輯最強)</option>
                                         <option value="llama-3.1-8b-instant">Llama 3.1 8B (極速/日常看盤)</option>
                                     </select>
                                 </div>
-                                <div className="border-t border-gray-800 pt-4 mt-2">
-                                    <p className="text-[11px] text-gray-400 mb-2 font-bold">進階選項</p>
+                                <div className="border-t border-gray-800 pt-5 mt-2">
                                     <button onClick={(e) => {
                                         Object.keys(localStorage).forEach(k => { if(k.startsWith('groq_cache_')) localStorage.removeItem(k); });
                                         e.target.innerText = "已清除快取！(下回查詢強制連線)";
                                         setTimeout(() => { e.target.innerText = "清除本機深度分析快取"; }, 2000);
-                                    }} className="w-full bg-red-900/40 border border-red-800 text-red-300 py-2 text-xs font-bold rounded hover:bg-red-800 transition-colors">清除本機深度分析快取</button>
+                                    }} className="w-full bg-red-900/30 border border-red-800/50 text-red-300 py-2.5 text-xs font-bold rounded-lg hover:bg-red-800/50 transition-colors">清除本機深度分析快取</button>
                                 </div>
                                 <div className="flex gap-3 pt-2">
-                                    <button onClick={saveSettings} className="flex-1 bg-blue-600 py-2 text-xs font-black rounded hover:bg-blue-500 transition-colors">儲存設定</button>
-                                    <button onClick={() => setShowSettings(false)} className="px-6 bg-gray-800 text-xs font-bold rounded hover:bg-gray-700">關閉</button>
+                                    <button onClick={saveSettings} className="flex-1 bg-blue-600 py-2.5 text-xs font-black rounded-lg hover:bg-blue-500 transition-colors shadow-lg">儲存設定</button>
+                                    <button onClick={() => setShowSettings(false)} className="px-6 bg-gray-800 text-xs font-bold rounded-lg hover:bg-gray-700">關閉</button>
                                 </div>
                             </div>
                         </div>
                     ) : null}
 
                     {error ? (
-                        <div className="flex-none bg-red-900/30 border border-red-500/50 text-red-200 p-2 text-center text-xs font-bold mb-2 rounded flex items-center justify-center gap-4 animate-pulse">
-                            <span>提示：{error}</span>
+                        <div className="flex-none bg-red-900/30 border border-red-500/30 text-red-300 p-2.5 text-center text-xs font-bold mb-3 rounded-xl flex items-center justify-center gap-4 shadow-lg">
+                            <span>系統提示：{error}</span>
                         </div>
                     ) : null}
 
-                    <main className={`flex-1 grid grid-cols-1 lg:grid-cols-12 gap-2 overflow-hidden ${(isFullScreen || zenMode) ? 'h-full' : ''}`}>
+                    <main className={`flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 overflow-hidden ${(isFullScreen || zenMode) ? 'h-full' : ''}`}>
                         
-                        {/* 左側：5 個區塊，完全填補空白 */}
-                        <div className="col-span-12 lg:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-1">
+                        {/* 左側：市場、同業、估值、成長、風險 */}
+                        <div className="col-span-12 lg:col-span-3 flex flex-col gap-3 overflow-y-auto custom-scrollbar pr-1 pb-2">
                             {!customKey ? (
-                                <div className="bg-blue-900/20 border border-blue-700 p-4 rounded text-center mb-1 flex-none">
-                                    <p className="text-xs text-blue-300 font-bold mb-3 tracking-widest leading-relaxed">請設定 Groq 金鑰以啟用 AI</p>
-                                    <button onClick={() => setShowSettings(true)} className="bg-blue-600 text-white text-xs px-6 py-2 rounded font-black hover:bg-blue-500 shadow">立即設定</button>
+                                <div className="panel-card p-5 text-center mb-1 flex-none border-blue-900/30 bg-blue-950/10">
+                                    <p className="text-xs text-blue-300 font-bold mb-4 tracking-widest leading-relaxed">請設定 Groq 金鑰以啟用 AI 分析</p>
+                                    <button onClick={() => setShowSettings(true)} className="bg-blue-600 text-white text-xs px-8 py-2.5 rounded-lg font-black hover:bg-blue-500 shadow-[0_0_15px_rgba(37,99,235,0.4)] transition-all">立即設定</button>
                                 </div>
                             ) : null}
                             
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
-                                <div className="bg-blue-950/40 border-b border-blue-900/60 p-2 px-3 text-blue-300 font-bold text-xs tracking-widest font-mono">市場聯動分析</div>
-                                <div className="p-3 space-y-2 text-xs">
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono tracking-widest">台股大盤 <span className="text-white font-bold">{aiData?.market?.taiex || (aiLoading ? "讀取中" : "---")}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono tracking-widest">費半指數 <span className="text-white font-bold">{aiData?.market?.sox || (aiLoading ? "讀取中" : "---")}</span></div>
-                                    <div className="flex justify-between pb-0.5 font-mono tracking-widest">那斯達克 <span className="text-white font-bold">{aiData?.market?.nasdaq || (aiLoading ? "讀取中" : "---")}</span></div>
+                            <div className="panel-card flex-none animate-fade-up">
+                                <div className="bg-blue-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl"><span className="text-blue-400 font-bold text-xs tracking-widest uppercase">市場聯動分析</span></div>
+                                <div className="p-4 space-y-3 text-xs">
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono tracking-widest"><span className="text-gray-500">台股大盤</span><span className="text-white font-bold">{aiData?.market?.taiex || (aiLoading ? "讀取中" : "---")}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono tracking-widest"><span className="text-gray-500">費半指數</span><span className="text-white font-bold">{aiData?.market?.sox || (aiLoading ? "讀取中" : "---")}</span></div>
+                                    <div className="flex justify-between pb-1 font-mono tracking-widest"><span className="text-gray-500">那斯達克</span><span className="text-white font-bold">{aiData?.market?.nasdaq || (aiLoading ? "讀取中" : "---")}</span></div>
                                 </div>
                             </div>
                             
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
-                                <div className="bg-purple-950/40 border-b border-purple-900/60 p-2 px-3 text-purple-300 font-bold text-xs tracking-widest font-mono">同業競爭比較</div>
-                                <div className="p-3 space-y-2 text-xs">
+                            <div className="panel-card flex-none animate-fade-up delay-100">
+                                <div className="bg-purple-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl"><span className="text-purple-400 font-bold text-xs tracking-widest uppercase">同業競爭比較</span></div>
+                                <div className="p-4 space-y-2 text-xs">
                                     {aiData?.peers && aiData.peers.length > 0 ? (
                                         aiData.peers.map((p, i) => (
-                                            <div key={i} className="flex justify-between bg-gray-900/40 p-2.5 mb-2 rounded border border-gray-800 font-mono">
-                                                <span className="text-white font-bold">{p.name}</span>
-                                                <span className={p.change && String(p.change).includes('-') ? 'text-green-500' : 'text-red-500'}>{p.change}</span>
+                                            <div key={i} className="flex justify-between bg-black/40 p-3 mb-2 rounded-lg border border-white/5 font-mono hover:bg-white/5 transition-colors">
+                                                <span className="text-gray-200 font-bold">{p.name}</span>
+                                                <span className={p.change && String(p.change).includes('-') ? 'text-green-400' : 'text-red-400'}>{p.change}</span>
                                             </div>
                                         ))
                                     ) : (
-                                        <div className="loading-shimmer h-12 rounded opacity-10"></div>
+                                        <div className="loading-shimmer h-12 rounded-lg opacity-20"></div>
                                     )}
                                 </div>
                             </div>
                             
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
-                                <div className="bg-slate-900 border-b border-gray-700 p-2 px-3 text-gray-300 font-bold text-xs tracking-widest font-mono">基本面與估值</div>
-                                <div className="p-3 space-y-2 text-xs">
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-blue-300 tracking-tighter">公司總市值 <span className="text-white font-bold font-mono">{aiData?.valuation?.marketCap || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">殖利率/股淨比 <span className="text-white font-bold font-mono">{aiData?.valuation?.yield || "---"} / {aiData?.valuation?.pb || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">AI 估值評等 <span className="text-yellow-500 font-black tracking-widest text-sm">{aiData?.valuation?.rating || "---"}</span></div>
+                            <div className="panel-card flex-none animate-fade-up delay-200">
+                                <div className="bg-slate-900/40 border-b border-white/5 p-2.5 px-4 rounded-t-xl"><span className="text-gray-300 font-bold text-xs tracking-widest uppercase">基本面與估值</span></div>
+                                <div className="p-4 space-y-3 text-xs">
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-blue-300 tracking-tighter">公司總市值 <span className="text-white font-bold font-mono">{aiData?.valuation?.marketCap || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">殖利率/股淨比 <span className="text-white font-bold font-mono">{aiData?.valuation?.yield || "---"} / {aiData?.valuation?.pb || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">AI 估值評等 <span className="text-yellow-400 font-black tracking-widest text-sm">{aiData?.valuation?.rating || "---"}</span></div>
                                 </div>
                             </div>
 
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
-                                <div className="bg-cyan-950/40 border-b border-cyan-900/60 p-2 px-3 text-cyan-300 font-bold text-xs tracking-widest font-mono">營收與獲利動能</div>
-                                <div className="p-3 space-y-2 text-xs">
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">月營收 (MoM) <span className="text-white font-bold font-mono">{aiData?.growth?.mom || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">年營收 (YoY) <span className="text-white font-bold font-mono">{aiData?.growth?.yoy || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">預估本益比 (F.P/E) <span className="text-yellow-400 font-bold font-mono">{aiData?.growth?.forwardPE || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">最新毛利率 <span className="text-white font-bold font-mono">{aiData?.growth?.grossMargin || "---"}</span></div>
+                            <div className="panel-card flex-none animate-fade-up delay-300">
+                                <div className="bg-cyan-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl"><span className="text-cyan-400 font-bold text-xs tracking-widest uppercase">營收與獲利動能</span></div>
+                                <div className="p-4 space-y-3 text-xs">
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">月營收 (MoM) <span className="text-white font-bold font-mono">{aiData?.growth?.mom || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">年營收 (YoY) <span className="text-white font-bold font-mono">{aiData?.growth?.yoy || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">預估本益比 (F.P/E) <span className="text-yellow-400 font-bold font-mono">{aiData?.growth?.forwardPE || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">最新毛利率 <span className="text-white font-bold font-mono">{aiData?.growth?.grossMargin || "---"}</span></div>
                                 </div>
                             </div>
 
-                            {/* 左下角填充區塊：風險預警 */}
-                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 shadow-sm flex flex-col min-h-[120px]">
-                                <div className="bg-red-950/30 border-b border-red-900/50 p-2 px-3 flex justify-between items-center text-red-300 font-bold text-xs tracking-widest font-mono"><span>風險與事件預警</span><span className={`px-2 py-0.5 rounded text-[10px] bg-red-900/40 text-white`}>{aiData?.risk?.level || "-"} 風險</span></div>
-                                <div className="p-3 flex-1 text-xs text-gray-400 leading-relaxed text-justify">
+                            <div className="panel-card flex-1 flex flex-col min-h-[140px] animate-fade-up delay-400">
+                                <div className="bg-red-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl flex justify-between items-center text-red-400 font-bold text-xs tracking-widest font-mono"><span>風險與事件預警</span><span className={`px-2 py-0.5 rounded text-[10px] bg-red-900/40 text-white shadow-inner`}>{aiData?.risk?.level || "-"} 風險</span></div>
+                                <div className="p-4 flex-1 text-xs text-gray-400 leading-relaxed text-justify whitespace-normal break-words">
                                     {aiData?.risk?.details || (aiLoading ? "正在掃描市場潛在風險與事件..." : "等待資訊同步")}
                                 </div>
                             </div>
                         </div>
 
-                        <div className="col-span-12 lg:col-span-6 flex flex-col overflow-hidden">
-                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 flex flex-col relative overflow-hidden shadow-sm">
-                                <div className="bg-green-950/40 border-b border-green-900/60 p-2 px-3 flex justify-between items-center z-10 h-10">
-                                    <span className="text-green-300 font-bold text-xs tracking-widest font-mono">技術線圖儀表板</span>
-                                    <div className="flex border border-gray-600 rounded overflow-hidden h-7 bg-black">
-                                        <button onClick={() => setTimeframe('1D')} disabled={aiLoading} className={`px-4 text-xs font-black transition-colors ${timeframe === '1D' ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'} disabled:opacity-50`}>日線</button>
-                                        <button onClick={() => setTimeframe('1W')} disabled={aiLoading} className={`px-4 text-xs font-black transition-colors ${timeframe === '1W' ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'} disabled:opacity-50`}>週線</button>
+                        {/* 中間：量化技術圖表 */}
+                        <div className="col-span-12 lg:col-span-6 flex flex-col overflow-hidden pb-2">
+                            <div className="panel-card flex-1 flex flex-col relative overflow-hidden shadow-2xl animate-fade-up delay-100">
+                                <div className="bg-green-950/20 border-b border-white/5 p-3 px-5 flex justify-between items-center z-10 h-14 rounded-t-xl">
+                                    <span className="text-green-400 font-bold text-sm tracking-widest uppercase">技術線圖終端</span>
+                                    <div className="flex border border-white/10 rounded-lg overflow-hidden h-8 bg-black/60 shadow-inner">
+                                        <button onClick={() => setTimeframe('1D')} disabled={aiLoading} className={`px-5 text-xs font-black transition-colors ${timeframe === '1D' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white hover:bg-white/5'} disabled:opacity-50`}>日線</button>
+                                        <button onClick={() => setTimeframe('1W')} disabled={aiLoading} className={`px-5 text-xs font-black transition-colors ${timeframe === '1W' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white hover:bg-white/5'} disabled:opacity-50`}>週線</button>
                                     </div>
                                 </div>
-                                <div className="flex-1 relative bg-black flex flex-col">
+                                <div className="flex-1 relative bg-transparent flex flex-col">
                                     {(!loading && chartData.length === 0 && !error) ? (
-                                        <div className="absolute inset-0 flex flex-col justify-center items-center z-10 bg-black/90">
-                                            <span className="text-gray-500 text-sm font-black tracking-[0.5em]">報價伺服器連線中斷</span>
+                                        <div className="absolute inset-0 flex flex-col justify-center items-center z-10 bg-black/80 backdrop-blur-sm">
+                                            <span className="text-gray-500 text-sm font-black tracking-[0.5em] uppercase">No Data Stream</span>
                                         </div>
                                     ) : null}
                                     {(loading && chartData.length === 0) ? (
-                                        <div className="absolute inset-0 flex flex-col justify-center items-center z-10 bg-black/90">
-                                            <span className="text-gray-600 text-sm font-black animate-pulse tracking-[0.5em]">資料連線建立中...</span>
+                                        <div className="absolute inset-0 flex flex-col justify-center items-center z-10 bg-black/80 backdrop-blur-sm">
+                                            <span className="text-blue-500 text-sm font-black animate-pulse tracking-[0.5em] uppercase">Connecting...</span>
                                         </div>
                                     ) : null}
                                     
-                                    <div className="relative w-full flex-1 min-h-[150px]">
-                                        <span className="absolute top-2 left-2 z-10 text-[10px] text-gray-400 font-mono pointer-events-none bg-black/60 px-1.5 py-0.5 rounded">主圖：K線與均線 (MA5, MA20, MA60)</span>
-                                        <div ref={containerRefs.kline} className="absolute inset-0 w-full h-full" />
+                                    {/* 完美隔離的標籤佈局：給予 pt-6 Padding 防止重疊 */}
+                                    <div className="relative w-full flex-1 min-h-[200px] pt-6">
+                                        <span className="absolute top-1.5 left-3 z-10 text-[10px] text-gray-400 font-mono pointer-events-none bg-black/40 backdrop-blur-md px-2 py-0.5 rounded shadow-sm border border-white/5">主圖：K線與均線 (MA5, MA20, MA60)</span>
+                                        <div ref={containerRefs.kline} className="absolute inset-0 pt-6 w-full h-full" />
                                     </div>
                                     
-                                    <div className="relative w-full h-[70px] flex-none border-t border-gray-800">
-                                        <span className="absolute top-1 left-2 z-10 text-[9px] text-gray-500 font-mono pointer-events-none bg-black/60 px-1.5 py-0.5 rounded">成交量 (Volume)</span>
-                                        <div ref={containerRefs.vol} className="absolute inset-0 w-full h-full" />
+                                    <div className="relative w-full h-[80px] flex-none border-t border-white/5 pt-5 bg-black/20">
+                                        <span className="absolute top-1 left-3 z-10 text-[9px] text-gray-400 font-mono pointer-events-none bg-black/40 backdrop-blur-md px-2 py-0.5 rounded shadow-sm border border-white/5">成交量 (Volume)</span>
+                                        <div ref={containerRefs.vol} className="absolute inset-0 pt-5 w-full h-[calc(100%-20px)]" />
                                     </div>
                                     
-                                    <div className="relative w-full h-[90px] flex-none border-t border-gray-800">
-                                        <span className="absolute top-1 left-2 z-10 text-[9px] text-gray-500 font-mono pointer-events-none bg-black/60 px-1.5 py-0.5 rounded">MACD (12, 26, 9) - 趨勢動能</span>
-                                        <div ref={containerRefs.macd} className="absolute inset-0 w-full h-full" />
+                                    <div className="relative w-full h-[100px] flex-none border-t border-white/5 pt-5 bg-black/20">
+                                        <span className="absolute top-1 left-3 z-10 text-[9px] text-gray-400 font-mono pointer-events-none bg-black/40 backdrop-blur-md px-2 py-0.5 rounded shadow-sm border border-white/5">MACD (12, 26, 9) - 趨勢動能</span>
+                                        <div ref={containerRefs.macd} className="absolute inset-0 pt-5 w-full h-[calc(100%-20px)]" />
                                     </div>
                                     
-                                    <div className="relative w-full h-[90px] flex-none border-t border-gray-800">
-                                        <span className="absolute top-1 left-2 z-10 text-[9px] text-gray-500 font-mono pointer-events-none bg-black/60 px-1.5 py-0.5 rounded">KDJ (9, 3, 3) - 隨機指標</span>
-                                        <div ref={containerRefs.kdj} className="absolute inset-0 w-full h-full" />
+                                    <div className="relative w-full h-[100px] flex-none border-t border-white/5 pt-5 bg-black/20 rounded-b-xl">
+                                        <span className="absolute top-1 left-3 z-10 text-[9px] text-gray-400 font-mono pointer-events-none bg-black/40 backdrop-blur-md px-2 py-0.5 rounded shadow-sm border border-white/5">KDJ (9, 3, 3) - 隨機指標</span>
+                                        <div ref={containerRefs.kdj} className="absolute inset-0 pt-5 w-full h-[calc(100%-20px)]" />
                                     </div>
                                 </div>
                             </div>
                         </div>
 
-                        {/* 右側：4 個區塊，完全填補空白 */}
-                        <div className="col-span-12 lg:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pl-1">
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
-                                <div className="bg-purple-950/40 border-b border-purple-900/60 p-2 px-3 text-purple-300 font-bold text-xs tracking-widest font-mono">籌碼流向分析</div>
-                                <div className="p-3 space-y-2 text-xs">
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">外資動態 <span className="text-white font-bold font-mono">{aiData?.chips?.foreign || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">投信動態 <span className="text-blue-400 font-bold font-mono">{aiData?.chips?.trust || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter text-blue-400">主力持股 <span className="text-white font-black font-mono">{aiData?.chips?.big || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter text-green-400">散戶持股 <span className="text-white font-bold font-mono">{aiData?.chips?.retail || "---"}</span></div>
+                        {/* 右側：籌碼、資金、戰略、新聞 */}
+                        <div className="col-span-12 lg:col-span-3 flex flex-col gap-3 overflow-y-auto custom-scrollbar pl-1 pb-2">
+                            <div className="panel-card flex-none animate-fade-up">
+                                <div className="bg-purple-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl"><span className="text-purple-400 font-bold text-xs tracking-widest uppercase">籌碼流向解析</span></div>
+                                <div className="p-4 space-y-3 text-xs">
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">外資動態 <span className="text-white font-bold font-mono">{aiData?.chips?.foreign || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">投信動態 <span className="text-blue-400 font-bold font-mono">{aiData?.chips?.trust || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">主力持股 <span className="text-white font-black font-mono">{aiData?.chips?.big || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">散戶持股 <span className="text-white font-bold font-mono">{aiData?.chips?.retail || "---"}</span></div>
                                 </div>
                             </div>
 
-                            {/* 右側填充區塊：資金流向監測 */}
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
-                                <div className="bg-indigo-950/40 border-b border-indigo-900/60 p-2 px-3 flex justify-between items-center text-indigo-300 font-bold text-xs tracking-widest font-mono">資金流向監測</div>
-                                <div className="p-3 space-y-2 text-xs">
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">買盤流入 <span className="text-red-400 font-bold font-mono">{aiData?.moneyFlow?.inflow || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">賣盤流出 <span className="text-green-400 font-bold font-mono">{aiData?.moneyFlow?.outflow || "---"}</span></div>
-                                    <div className="flex justify-between border-b border-gray-800 border-dotted pb-1.5 font-mono text-gray-500 tracking-tighter">淨額 <span className="text-white font-black font-mono">{aiData?.moneyFlow?.net || "---"}</span></div>
-                                    <div className="mt-2 text-gray-400 bg-gray-900/50 p-2 border border-gray-800 leading-relaxed text-justify text-[11px] font-medium">{aiData?.moneyFlow?.analysis || (aiLoading ? "正在解析資金流向..." : "等待同步")}</div>
+                            <div className="panel-card flex-none animate-fade-up delay-100">
+                                <div className="bg-indigo-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl"><span className="text-indigo-400 font-bold text-xs tracking-widest uppercase">資金面監測</span></div>
+                                <div className="p-4 space-y-3 text-xs">
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">買盤流入 <span className="text-red-400 font-bold font-mono">{aiData?.moneyFlow?.inflow || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">賣盤流出 <span className="text-green-400 font-bold font-mono">{aiData?.moneyFlow?.outflow || "---"}</span></div>
+                                    <div className="flex justify-between border-b border-white/5 pb-2 font-mono text-gray-500 tracking-tighter">淨額 <span className="text-white font-black font-mono text-sm">{aiData?.moneyFlow?.net || "---"}</span></div>
+                                    <div className="mt-3 text-gray-400 bg-black/40 p-3 border border-white/5 rounded-lg leading-relaxed text-justify whitespace-normal break-words">{aiData?.moneyFlow?.analysis || (aiLoading ? "正在解析資金流向..." : "等待同步")}</div>
                                 </div>
                             </div>
 
-                            <div className="bg-[#050505] border border-gray-800 rounded shadow-sm flex-none">
-                                <div className="bg-orange-950/40 border-b border-orange-900/60 p-2 px-3 flex justify-between items-center text-orange-300 font-bold text-xs tracking-widest font-mono"><span>AI 戰略矩陣</span><span className="text-lg font-black text-white font-mono">{aiData?.strategy?.score || 0} 評分</span></div>
-                                <div className="p-3 space-y-2 text-xs">
-                                    <div className="bg-gray-900/60 p-3 rounded border border-gray-800 leading-tight"><span className="text-white font-black block mb-2 text-sm font-mono">{aiData?.strategy?.conclusion || (aiLoading ? "計算核心戰略中..." : "等待分析")}</span><span className="text-gray-400 block text-xs tracking-tighter font-bold font-mono">短線操作：{aiData?.strategy?.short || "Analyzing"}</span></div>
-                                    <div className="flex justify-between p-2.5 bg-red-950/20 border border-red-900/50 font-mono text-red-400 font-black text-xs tracking-tighter">停損建議 <span className="text-white font-black tracking-widest font-mono text-sm">{aiData?.strategy?.stop || "---"}</span></div>
+                            <div className="panel-card flex-none animate-fade-up delay-200">
+                                <div className="bg-orange-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl flex justify-between items-center"><span className="text-orange-400 font-bold text-xs tracking-widest uppercase">AI 戰略矩陣</span><span className="text-lg font-black text-white font-mono bg-orange-900/30 px-2 py-0.5 rounded shadow-inner">{aiData?.strategy?.score || 0} 評分</span></div>
+                                <div className="p-4 space-y-3 text-xs">
+                                    <div className="bg-black/40 p-4 rounded-lg border border-white/5 shadow-inner"><span className="text-white font-black block mb-2 text-sm font-mono whitespace-normal">{aiData?.strategy?.conclusion || (aiLoading ? "運算中..." : "等待分析")}</span><span className="text-gray-400 block text-xs tracking-tighter font-bold font-mono">短線操作：{aiData?.strategy?.short || "Analyzing"}</span></div>
+                                    <div className="flex justify-between p-3 bg-red-950/20 border border-red-900/30 font-mono text-red-400 font-black text-xs tracking-widest uppercase rounded-lg">停損建議 <span className="text-white font-black text-sm">{aiData?.strategy?.stop || "---"}</span></div>
                                 </div>
                             </div>
 
-                            <div className="bg-[#050505] border border-gray-800 rounded flex-1 min-h-[150px] shadow-sm flex flex-col">
-                                <div className="bg-yellow-950/40 border-b border-yellow-900/60 p-2 px-3 text-yellow-300 font-bold text-xs tracking-widest font-mono">即時情報新聞</div>
-                                <div className="p-2 space-y-2 flex-1 overflow-y-auto custom-scrollbar">
+                            <div className="panel-card flex-1 min-h-[200px] flex flex-col animate-fade-up delay-300">
+                                <div className="bg-yellow-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl"><span className="text-yellow-400 font-bold text-xs tracking-widest uppercase">即時情報與觀點</span></div>
+                                <div className="p-2 space-y-1 flex-1 overflow-y-auto custom-scrollbar">
                                     {aiData?.news && aiData.news.length > 0 ? (
                                         aiData.news.map((n, i) => (
-                                            <a key={i} href={"https://www.google.com/search?q=" + encodeURIComponent(stockId + ' ' + String(n.title)) + "&tbm=nws"} target="_blank" rel="noreferrer" className="block border-b border-gray-800 border-dotted p-2.5 hover:bg-gray-800 transition-all group">
-                                                <div className="flex justify-between text-[11px] mb-1.5 font-mono text-gray-500">{n.date} <span className={n.impact === '多' ? 'text-red-500 font-black' : 'text-green-500 font-black'}>{n.impact}</span></div>
-                                                <span className="text-gray-200 font-bold text-xs line-clamp-2 leading-relaxed group-hover:text-blue-400 transition-colors">{n.title}</span>
+                                            <a key={i} href={"https://www.google.com/search?q=" + encodeURIComponent(stockId + ' ' + String(n.title)) + "&tbm=nws"} target="_blank" rel="noreferrer" className="block border-b border-white/5 p-3 hover:bg-white/5 transition-colors rounded-lg group">
+                                                <div className="flex justify-between text-[10px] mb-2 font-mono text-gray-500">{n.date} <span className={n.impact === '多' ? 'text-red-400 font-black' : 'text-green-400 font-black'}>{n.impact}</span></div>
+                                                <span className="text-gray-300 font-bold text-xs line-clamp-2 leading-relaxed group-hover:text-blue-400 transition-colors">{n.title}</span>
                                             </a>
                                         ))
                                     ) : (
-                                        <div className="loading-shimmer h-24 rounded opacity-10 mt-2"></div>
+                                        <div className="loading-shimmer h-24 rounded-lg opacity-20 m-2"></div>
                                     )}
                                 </div>
                             </div>
                         </div>
                     </main>
-
-                    <style dangerouslySetInnerHTML={{ __html: `
-                        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
-                        .custom-scrollbar::-webkit-scrollbar-track { background: #000; }
-                        .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
-                        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
-                        * { scrollbar-width: thin; scrollbar-color: #333 #000; }
-                    `}} />
                 </div>
             );
         };
