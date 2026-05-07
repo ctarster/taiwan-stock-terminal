@@ -59,10 +59,6 @@
         .glass-panel { background: rgba(10, 10, 10, 0.85); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); }
         .panel-card { background-color: #0a0a0a; border: 1px solid rgba(255,255,255,0.04); border-radius: 0.75rem; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.6); transition: transform 0.3s ease, border-color 0.3s ease; }
         .panel-card:hover { border-color: rgba(255,255,255,0.12); }
-        
-        /* 隱藏新聞工具提示，Hover顯示 */
-        .news-tooltip { visibility: hidden; opacity: 0; transition: visibility 0s, opacity 0.3s linear; }
-        .group:hover .news-tooltip { visibility: visible; opacity: 1; transition-delay: 0.2s; }
     </style>
 </head>
 <body>
@@ -205,20 +201,17 @@
         };
 
         const App = () => {
-            // 核心狀態
             const [stockId, setStockId] = useState('2330');
             const [inputValue, setInputValue] = useState('');
             const [customKey, setCustomKey] = useState(() => (localStorage.getItem('groq_api_key') || '').trim());
             const [aiModel, setAiModel] = useState(() => (localStorage.getItem('groq_model_name') || 'llama-3.3-70b-versatile').trim());
             
-            // 系統狀態
             const [loading, setLoading] = useState(false);
             const [aiLoading, setAiLoading] = useState(false);
             const [error, setError] = useState(null);
             
-            // 資料狀態
-            const [fullStockList, setFullStockList] = useState([]); // 儲存全市場股票清單供搜尋使用
-            const [suggestions, setSuggestions] = useState([]); // 搜尋建議列表
+            const [fullStockList, setFullStockList] = useState([]); 
+            const [suggestions, setSuggestions] = useState([]); 
             const [showSuggestions, setShowSuggestions] = useState(false);
             
             const [chartData, setChartData] = useState([]); 
@@ -227,15 +220,15 @@
             const [timeframe, setTimeframe] = useState('1D'); 
             const [aiData, setAiData] = useState(null);
             
-            // UI 狀態
+            // 新增：新聞浮動預覽視窗狀態
+            const [newsTooltip, setNewsTooltip] = useState({ visible: false, x: 0, y: 0, content: null });
+
             const [isFullScreen, setIsFullScreen] = useState(false);
             const [zenMode, setZenMode] = useState(false);
             const [showSettings, setShowSettings] = useState(false);
             const [animationKey, setAnimationKey] = useState(0);
 
-            // 參考指標
             const rootRef = useRef(null);
-            const inputRef = useRef(null);
             const chartRefs = useRef({});
             const seriesRefs = useRef({});
             const containerRefs = { kline: useRef(null), vol: useRef(null), macd: useRef(null), kdj: useRef(null) };
@@ -246,7 +239,6 @@
             const refreshTimer = useRef(null);
             const enrichedDataRef = useRef([]);
 
-            // 初始化載入台股全清單供智慧搜尋使用
             useEffect(() => {
                 const loadStockList = async () => {
                     try {
@@ -262,14 +254,13 @@
                 loadStockList();
             }, []);
 
-            // 處理搜尋框輸入與預覽建議
             const onInputChange = (e) => {
                 const val = e.target.value;
                 setInputValue(val);
                 if (val.trim() && fullStockList.length > 0) {
                     const filtered = fullStockList.filter(s => 
                         s.stock_id.includes(val) || s.stock_name.includes(val)
-                    ).slice(0, 8); // 最多顯示 8 筆預覽
+                    ).slice(0, 8); 
                     setSuggestions(filtered);
                     setShowSuggestions(true);
                 } else {
@@ -319,35 +310,32 @@
                 return () => document.removeEventListener('fullscreenchange', fn);
             }, []);
 
-            // --- 圖表初始化 ---
+            // --- 核心優化：彈性自適應圖表 (完全避免溢出) ---
             const initCharts = useCallback(() => {
                 if (!window.LightweightCharts || isChartInitialized.current || !containerRefs.kline.current) return;
                 
-                const width = containerRefs.kline.current.clientWidth;
-                const kHeight = containerRefs.kline.current.clientHeight || 250;
-                
                 const baseOpts = {
-                    width, layout: { background: { color: 'transparent' }, textColor: '#9ca3af', fontSize: 11 },
+                    layout: { background: { color: 'transparent' }, textColor: '#9ca3af', fontSize: 11 },
                     grid: { vertLines: { color: 'rgba(255,255,255,0.04)' }, horzLines: { color: 'rgba(255,255,255,0.04)' } },
                     rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' }, crosshair: { mode: 0 },
                     handleScroll: true, handleScale: true
                 };
 
-                const kChart = window.LightweightCharts.createChart(containerRefs.kline.current, { ...baseOpts, height: kHeight, timeScale: { borderColor: 'rgba(255,255,255,0.1)', fixRightEdge: true, rightOffset: 5 } });
+                const kChart = window.LightweightCharts.createChart(containerRefs.kline.current, { ...baseOpts, timeScale: { borderColor: 'rgba(255,255,255,0.1)', fixRightEdge: true, rightOffset: 5 } });
                 const kSeries = kChart.addCandlestickSeries({ upColor: '#ef4444', downColor: '#22c55e', borderVisible: false, wickUpColor: '#ef4444', wickDownColor: '#22c55e' });
                 const ma5Series = kChart.addLineSeries({ color: '#facc15', lineWidth: 1.5, crosshairMarkerVisible: false });
                 const ma20Series = kChart.addLineSeries({ color: '#60a5fa', lineWidth: 1.5, crosshairMarkerVisible: false });
                 const ma60Series = kChart.addLineSeries({ color: '#4ade80', lineWidth: 1.5, crosshairMarkerVisible: false });
                 
-                const vChart = window.LightweightCharts.createChart(containerRefs.vol.current, { ...baseOpts, height: 60, timeScale: { visible: false, fixRightEdge: true } });
+                const vChart = window.LightweightCharts.createChart(containerRefs.vol.current, { ...baseOpts, timeScale: { visible: false, fixRightEdge: true } });
                 const vSeries = vChart.addHistogramSeries({ color: '#3b82f6', priceFormat: { type: 'volume' } });
                 
-                const mChart = window.LightweightCharts.createChart(containerRefs.macd.current, { ...baseOpts, height: 70, timeScale: { visible: false, fixRightEdge: true } });
+                const mChart = window.LightweightCharts.createChart(containerRefs.macd.current, { ...baseOpts, timeScale: { visible: false, fixRightEdge: true } });
                 const mDif = mChart.addLineSeries({ color: '#facc15', lineWidth: 1.5, crosshairMarkerVisible: false });
                 const mDea = mChart.addLineSeries({ color: '#60a5fa', lineWidth: 1.5, crosshairMarkerVisible: false });
                 const mHist = mChart.addHistogramSeries();
                 
-                const kjChart = window.LightweightCharts.createChart(containerRefs.kdj.current, { ...baseOpts, height: 70, timeScale: { borderColor: 'rgba(255,255,255,0.1)', fixRightEdge: true } });
+                const kjChart = window.LightweightCharts.createChart(containerRefs.kdj.current, { ...baseOpts, timeScale: { borderColor: 'rgba(255,255,255,0.1)', fixRightEdge: true } });
                 const kjK = kjChart.addLineSeries({ color: '#f8fafc', lineWidth: 1.5, crosshairMarkerVisible: false });
                 const kjD = kjChart.addLineSeries({ color: '#facc15', lineWidth: 1.5, crosshairMarkerVisible: false });
                 const kjJ = kjChart.addLineSeries({ color: '#d946ef', lineWidth: 1.5, crosshairMarkerVisible: false });
@@ -355,8 +343,23 @@
                 chartRefs.current = { kChart, vChart, mChart, kjChart };
                 seriesRefs.current = { kSeries, ma5Series, ma20Series, ma60Series, vSeries, macdDifSeries: mDif, macdDeaSeries: mDea, macdHistSeries: mHist, kdjKSeries: kjK, kdjDSeries: kjD, kdjJSeries: kjJ };
 
+                // 綁定 ResizeObserver 確保圖表尺寸 100% 貼合容器，不再依賴固定 px
+                const resizeObserver = new ResizeObserver(entries => {
+                    for (let entry of entries) {
+                        const { width, height } = entry.contentRect;
+                        if (entry.target === containerRefs.kline.current && chartRefs.current.kChart) chartRefs.current.kChart.applyOptions({ width, height });
+                        if (entry.target === containerRefs.vol.current && chartRefs.current.vChart) chartRefs.current.vChart.applyOptions({ width, height });
+                        if (entry.target === containerRefs.macd.current && chartRefs.current.mChart) chartRefs.current.mChart.applyOptions({ width, height });
+                        if (entry.target === containerRefs.kdj.current && chartRefs.current.kjChart) chartRefs.current.kjChart.applyOptions({ width, height });
+                    }
+                });
+
+                resizeObserver.observe(containerRefs.kline.current);
+                resizeObserver.observe(containerRefs.vol.current);
+                resizeObserver.observe(containerRefs.macd.current);
+                resizeObserver.observe(containerRefs.kdj.current);
+
                 const instances = [kChart, vChart, mChart, kjChart];
-                
                 instances.forEach(c => {
                     c.timeScale().subscribeVisibleLogicalRangeChange(range => {
                         if (!range || isSyncing.current) return;
@@ -377,24 +380,6 @@
                     });
                 });
                 isChartInitialized.current = true;
-            }, []);
-
-            useEffect(() => {
-                if (!containerRefs.kline.current) return;
-                const observer = new ResizeObserver(entries => {
-                    for (let entry of entries) {
-                        const width = entry.contentRect.width;
-                        const kHeight = entry.contentRect.height;
-                        if (isChartInitialized.current && chartRefs.current) {
-                            if (chartRefs.current.kChart) chartRefs.current.kChart.applyOptions({ width, height: kHeight });
-                            if (chartRefs.current.vChart) chartRefs.current.vChart.applyOptions({ width });
-                            if (chartRefs.current.mChart) chartRefs.current.mChart.applyOptions({ width });
-                            if (chartRefs.current.kjChart) chartRefs.current.kjChart.applyOptions({ width });
-                        }
-                    }
-                });
-                observer.observe(containerRefs.kline.current);
-                return () => observer.disconnect();
             }, []);
 
             const updateChartData = useCallback((historyArray) => {
@@ -423,7 +408,6 @@
                 s.ma5Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma5[i] })));
                 s.ma20Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma20[i] })));
                 s.ma60Series.setData(sorted.map((d, i) => ({ time: d.time, value: ma60[i] })));
-                // 原生圖表吃原始成交量，我們在 Hover 標籤才除以 1000 轉為張數
                 s.vSeries.setData(sorted.map(data => ({ time: data.time, value: data.volume, color: data.close >= data.open ? 'rgba(239, 68, 68, 0.8)' : 'rgba(34, 197, 94, 0.8)' })));
                 s.macdDifSeries.setData(sorted.map((d, i) => ({ time: d.time, value: dif[i] || 0 })));
                 s.macdDeaSeries.setData(sorted.map((d, i) => ({ time: d.time, value: dea[i] || 0 })));
@@ -441,7 +425,6 @@
                 }
             }, [timeframe, chartData, initCharts, updateChartData]);
 
-            // --- 核心邏輯：報價同步與 AI 分析 ---
             const executeAnalysis = useCallback(async (target, isRefresh = false) => {
                 if (!target || isFetchingRef.current) return;
                 isFetchingRef.current = true;
@@ -458,7 +441,7 @@
                     }
 
                     const d = new Date(); d.setFullYear(d.getFullYear()-1);
-                    const historyRes = await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`, { cache: 'no-store' }, 15000);
+                    const historyRes = await fetch(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`);
                     const hJson = await historyRes.json();
                     
                     let historyCache = [];
@@ -483,7 +466,7 @@
                                 open: Number(rtData.open).toFixed(2), 
                                 high: Number(rtData.high).toFixed(2), 
                                 low: Number(rtData.low).toFixed(2), 
-                                volume: Math.round(rtData.volume / 1000) // 換算成張數
+                                volume: Math.round(rtData.volume / 1000)
                             };
                             
                             const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
@@ -496,7 +479,7 @@
                         } else {
                             lastClosePrice = latest.close.toString();
                             currentDataState = {
-                                open: Number(latest.open).toFixed(2), high: Number(latest.high).toFixed(2), low: Number(latest.low).toFixed(2), volume: Math.round(latest.volume / 1000) // 換算成張數
+                                open: Number(latest.open).toFixed(2), high: Number(latest.high).toFixed(2), low: Number(latest.low).toFixed(2), volume: Math.round(latest.volume / 1000)
                             };
                         }
                         
@@ -577,7 +560,7 @@
                                 { role: "user", content: `提供台股 [${target}] 分析數據，輸出純 JSON。` }
                             ]
                         })
-                    });
+                    }, 20000);
 
                     if(!aiRes.ok) throw new Error("API 伺服器異常");
                     const aiJson = await aiRes.json();
@@ -618,7 +601,7 @@
                 } catch (e) { 
                     const mockData = getMockData(target, "---");
                     setAiData(mockData);
-                    if(!isRefresh) setError(`分析異常，已切換至安全模式：${e.message}`); 
+                    if(!isRefresh) setError(`分析連線保護機制：${e.message}`); 
                 } finally { 
                     setAiLoading(false); 
                     setLoading(false);
@@ -653,6 +636,26 @@
             return (
                 <div key={animationKey} ref={rootRef} className={`min-h-screen bg-[#030303] text-gray-200 font-sans p-1.5 lg:p-3 overflow-hidden flex flex-col ${zenClass}`}>
                     
+                    {/* 全螢幕浮動新聞預覽 Portal */}
+                    {newsTooltip.visible && newsTooltip.content && (
+                        <div 
+                            className="fixed bg-gray-900 border border-white/20 p-4 rounded-xl shadow-[0_15px_50px_rgba(0,0,0,0.9)] z-[9999] pointer-events-none animate-fade-in"
+                            style={{ 
+                                top: newsTooltip.y + 15, 
+                                left: Math.min(newsTooltip.x + 15, window.innerWidth - 300) 
+                            }}
+                        >
+                            <div className="w-64">
+                                <div className="text-[10px] text-gray-400 font-mono mb-2 border-b border-gray-700 pb-1">情報深度解析預覽</div>
+                                <div className="text-white text-xs font-bold leading-relaxed mb-3">{newsTooltip.content.title}</div>
+                                <div className="flex items-center gap-2 text-xs">
+                                    <span className="text-gray-500">AI 判讀影響:</span>
+                                    <span className={`px-2 py-1 rounded font-black ${newsTooltip.content.impact === '多' ? 'bg-red-900/40 text-red-400' : 'bg-green-900/40 text-green-400'}`}>{newsTooltip.content.impact}</span>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* 頂部標頭列 */}
                     <header className="flex-none flex flex-col md:flex-row justify-between items-center mb-3 bg-[#0a0a0a] p-3 lg:p-4 border border-white/5 rounded-xl shadow-[0_4px_20px_rgba(0,0,0,0.5)] relative header-glow">
                         <div className="flex flex-col lg:flex-row lg:items-center gap-4 w-full lg:w-auto">
@@ -749,8 +752,15 @@
 
                     <main className={`flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 overflow-hidden ${(isFullScreen || zenMode) ? 'h-full' : ''}`}>
                         
-                        {/* 左側資訊欄 */}
+                        {/* 左側：市場、同業、估值、成長、風險 */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-3 overflow-y-auto custom-scrollbar pr-1 pb-2">
+                            {!customKey ? (
+                                <div className="panel-card p-5 text-center mb-1 flex-none border-blue-900/30 bg-blue-950/10">
+                                    <p className="text-xs text-blue-300 font-bold mb-4 tracking-widest leading-relaxed">請設定 Groq 金鑰以啟用 AI 分析</p>
+                                    <button onClick={() => setShowSettings(true)} className="bg-blue-600 text-white text-xs px-8 py-2.5 rounded-lg font-black hover:bg-blue-500 shadow-[0_0_15px_rgba(37,99,235,0.4)] transition-all">立即設定</button>
+                                </div>
+                            ) : null}
+                            
                             <div className="panel-card flex-none animate-fade-up">
                                 <div className="bg-blue-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl"><span className="text-blue-400 font-bold text-xs tracking-widest uppercase">市場聯動分析</span></div>
                                 <div className="p-4 space-y-3 text-xs">
@@ -803,11 +813,11 @@
                             </div>
                         </div>
 
-                        {/* 中間圖表區塊 */}
+                        {/* 中間圖表區塊：自適應 Flex 比例排版 */}
                         <div className="col-span-12 lg:col-span-6 flex flex-col overflow-hidden pb-2">
                             <div className="panel-card flex-1 flex flex-col relative overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.8)] animate-fade-up delay-100">
                                 
-                                <div className="bg-green-950/10 border-b border-white/5 p-3 px-5 flex justify-between items-center z-10 h-14 rounded-t-xl">
+                                <div className="bg-green-950/10 border-b border-white/5 p-3 px-5 flex justify-between items-center z-10 h-14 rounded-t-xl flex-none">
                                     <div className="flex items-center gap-4">
                                         <span className="text-green-400 font-bold text-sm tracking-widest uppercase">技術線圖</span>
                                         {/* 即時盤中數據 (顯示張數) */}
@@ -824,7 +834,8 @@
                                     </div>
                                 </div>
 
-                                <div className="flex-1 relative bg-black/30 flex flex-col overflow-hidden">
+                                {/* 圖表區塊改為 flex 佈局，完美自適應高度不溢出 */}
+                                <div className="flex-1 relative bg-black/30 flex flex-col overflow-hidden p-1">
                                     {(!loading && chartData.length === 0 && !error) ? (
                                         <div className="absolute inset-0 flex flex-col justify-center items-center z-20 bg-black/80 backdrop-blur-sm">
                                             <span className="text-gray-500 text-sm font-black tracking-[0.5em] uppercase">No Data Stream</span>
@@ -836,52 +847,52 @@
                                         </div>
                                     ) : null}
 
-                                    {/* K 線圖與浮動標籤 */}
-                                    <div className="relative w-full flex-1 min-h-[180px]">
-                                        <div className="absolute top-2 left-3 z-10 flex flex-wrap gap-2 text-[10px] font-mono pointer-events-none">
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-gray-300 font-bold border border-white/5">K線</div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-white border border-white/5">
+                                    {/* K 線圖與浮動標籤 (佔 4 份) */}
+                                    <div className="relative w-full flex-[4] min-h-[120px] flex flex-col mb-1 rounded">
+                                        <div className="flex-none px-2 pt-1 flex flex-wrap gap-2 text-[10px] font-mono relative z-10 pointer-events-none">
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-gray-300 font-bold border border-white/5">K線</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-white border border-white/5">
                                                 <span className="text-gray-400 mr-2">{hoverData?.time || '最新'}</span>
                                                 開:{hoverData?.open||'-'} 高:{hoverData?.high||'-'} 低:{hoverData?.low||'-'} 收:{hoverData?.close||'-'}
                                             </div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-yellow-400 border border-white/5">MA5:{hoverData?.ma5?.toFixed(2)||'-'}</div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-blue-400 border border-white/5">MA20:{hoverData?.ma20?.toFixed(2)||'-'}</div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-green-400 border border-white/5">MA60:{hoverData?.ma60?.toFixed(2)||'-'}</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-yellow-400 border border-white/5">MA5:{hoverData?.ma5?.toFixed(2)||'-'}</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-blue-400 border border-white/5">MA20:{hoverData?.ma20?.toFixed(2)||'-'}</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-green-400 border border-white/5">MA60:{hoverData?.ma60?.toFixed(2)||'-'}</div>
                                         </div>
-                                        <div ref={containerRefs.kline} className="absolute inset-0 w-full h-full pt-8" />
+                                        <div ref={containerRefs.kline} className="flex-1 w-full" />
                                     </div>
                                     
-                                    {/* 成交量容器 (已轉換為張數) */}
-                                    <div className="relative w-full h-[60px] flex-none border-t border-white/5 bg-black/20">
-                                        <div className="absolute top-1 left-3 z-10 flex gap-2 text-[10px] font-mono pointer-events-none">
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-gray-300 font-bold border border-white/5">成交量</div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-blue-300 font-bold border border-white/5">
+                                    {/* 成交量容器 (佔 1 份) */}
+                                    <div className="relative w-full flex-[1] min-h-[40px] flex flex-col border-t border-white/5 bg-black/20 mb-1 rounded">
+                                        <div className="flex-none px-2 pt-1 flex gap-2 text-[10px] font-mono relative z-10 pointer-events-none">
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-gray-300 font-bold border border-white/5">成交量</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-blue-300 font-bold border border-white/5">
                                                 Vol: {hoverData?.volume ? Math.round(hoverData.volume / 1000) + ' 張' : '-'}
                                             </div>
                                         </div>
-                                        <div ref={containerRefs.vol} className="absolute inset-0 w-full h-full pt-6" />
+                                        <div ref={containerRefs.vol} className="flex-1 w-full" />
                                     </div>
                                     
-                                    {/* MACD */}
-                                    <div className="relative w-full h-[70px] flex-none border-t border-white/5 bg-black/20">
-                                        <div className="absolute top-1 left-3 z-10 flex gap-2 text-[10px] font-mono pointer-events-none">
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-gray-300 font-bold border border-white/5">MACD (12,26,9)</div>
-                                            <div className={`bg-black/60 backdrop-blur px-2 py-1 rounded border border-white/5 ${hoverData?.macd >= 0 ? "text-red-400" : "text-green-400"}`}>MACD:{hoverData?.macd?.toFixed(2)||'-'}</div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-yellow-400 border border-white/5">DIF:{hoverData?.dif?.toFixed(2)||'-'}</div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-blue-400 border border-white/5">DEA:{hoverData?.dea?.toFixed(2)||'-'}</div>
+                                    {/* MACD (佔 1.5 份) */}
+                                    <div className="relative w-full flex-[1.5] min-h-[50px] flex flex-col border-t border-white/5 bg-black/20 mb-1 rounded">
+                                        <div className="flex-none px-2 pt-1 flex gap-2 text-[10px] font-mono relative z-10 pointer-events-none">
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-gray-300 font-bold border border-white/5">MACD (12,26,9)</div>
+                                            <div className={`bg-black/80 px-2 py-0.5 rounded border border-white/5 ${hoverData?.macd >= 0 ? "text-red-400" : "text-green-400"}`}>MACD:{hoverData?.macd?.toFixed(2)||'-'}</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-yellow-400 border border-white/5">DIF:{hoverData?.dif?.toFixed(2)||'-'}</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-blue-400 border border-white/5">DEA:{hoverData?.dea?.toFixed(2)||'-'}</div>
                                         </div>
-                                        <div ref={containerRefs.macd} className="absolute inset-0 w-full h-full pt-6" />
+                                        <div ref={containerRefs.macd} className="flex-1 w-full" />
                                     </div>
                                     
-                                    {/* KDJ */}
-                                    <div className="relative w-full h-[70px] flex-none border-t border-white/5 bg-black/20 rounded-b-xl">
-                                        <div className="absolute top-1 left-3 z-10 flex gap-2 text-[10px] font-mono pointer-events-none">
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-gray-300 font-bold border border-white/5">KDJ (9,3,3)</div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-white border border-white/5">K:{hoverData?.k?.toFixed(2)||'-'}</div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-yellow-400 border border-white/5">D:{hoverData?.d?.toFixed(2)||'-'}</div>
-                                            <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-pink-400 border border-white/5">J:{hoverData?.j?.toFixed(2)||'-'}</div>
+                                    {/* KDJ (佔 1.5 份) */}
+                                    <div className="relative w-full flex-[1.5] min-h-[50px] flex flex-col border-t border-white/5 bg-black/20 rounded-b-xl">
+                                        <div className="flex-none px-2 pt-1 flex gap-2 text-[10px] font-mono relative z-10 pointer-events-none">
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-gray-300 font-bold border border-white/5">KDJ (9,3,3)</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-white border border-white/5">K:{hoverData?.k?.toFixed(2)||'-'}</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-yellow-400 border border-white/5">D:{hoverData?.d?.toFixed(2)||'-'}</div>
+                                            <div className="bg-black/80 px-2 py-0.5 rounded text-pink-400 border border-white/5">J:{hoverData?.j?.toFixed(2)||'-'}</div>
                                         </div>
-                                        <div ref={containerRefs.kdj} className="absolute inset-0 w-full h-full pt-6" />
+                                        <div ref={containerRefs.kdj} className="flex-1 w-full" />
                                     </div>
                                 </div>
                             </div>
@@ -922,20 +933,19 @@
                                 <div className="p-2 space-y-1 flex-1 overflow-y-auto custom-scrollbar relative">
                                     {aiData?.news && aiData.news.length > 0 ? (
                                         aiData.news.map((n, i) => (
-                                            <div key={i} className="relative group block border-b border-white/5 p-3 hover:bg-white/5 transition-colors rounded-lg cursor-pointer">
+                                            <a 
+                                                key={i} 
+                                                href={`https://www.google.com/search?q=${encodeURIComponent(stockId + ' ' + String(n.title))}&tbm=nws`} 
+                                                target="_blank" 
+                                                rel="noreferrer" 
+                                                className="block border-b border-white/5 p-3 hover:bg-white/5 transition-colors rounded-lg group"
+                                                onMouseMove={(e) => setNewsTooltip({ visible: true, x: e.clientX, y: e.clientY, content: n })}
+                                                onMouseLeave={() => setNewsTooltip({ visible: false, x: 0, y: 0, content: null })}
+                                            >
                                                 <div className="flex justify-between text-[10px] mb-2 font-mono text-gray-500">{n.date} <span className={n.impact === '多' ? 'text-red-400 font-black' : 'text-green-400 font-black'}>{n.impact}</span></div>
                                                 <span className="text-gray-300 font-bold text-xs line-clamp-2 leading-relaxed group-hover:text-blue-400 transition-colors">{n.title}</span>
-                                                
-                                                {/* 懸浮新聞預覽卡片 */}
-                                                <div className="news-tooltip absolute bottom-full left-0 mb-2 w-full lg:w-[280px] lg:right-full lg:left-auto lg:mr-2 lg:bottom-auto lg:top-0 bg-gray-900 border border-white/20 p-4 rounded-xl shadow-2xl z-50 pointer-events-none">
-                                                    <div className="text-[10px] text-gray-400 font-mono mb-2 border-b border-gray-700 pb-1">情報深度解析預覽</div>
-                                                    <div className="text-white text-xs font-bold leading-relaxed mb-3">{n.title}</div>
-                                                    <div className="flex items-center gap-2 text-xs">
-                                                        <span className="text-gray-500">AI 判讀影響:</span>
-                                                        <span className={`px-2 py-1 rounded font-black ${n.impact === '多' ? 'bg-red-900/40 text-red-400' : 'bg-green-900/40 text-green-400'}`}>{n.impact}</span>
-                                                    </div>
-                                                </div>
-                                            </div>
+                                                <div className="text-[9px] text-blue-500/70 font-bold mt-2 text-right group-hover:text-blue-400 transition-colors">點擊閱讀全文 ↗</div>
+                                            </a>
                                         ))
                                     ) : (
                                         <div className="loading-shimmer h-24 rounded-lg opacity-20 m-2"></div>
