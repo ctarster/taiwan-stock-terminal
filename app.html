@@ -108,7 +108,7 @@
             return weekly;
         };
 
-        // --- 多重代理備援 Yahoo 即時報價引擎 ---
+        // --- 多重代理備援 Yahoo 即時報價引擎 (單筆) ---
         const fetchRealTimeYahoo = async (target) => {
             const timestamp = Date.now();
             const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}.TW,${target}.TWO&_t=${timestamp}`;
@@ -168,6 +168,38 @@
             return null; 
         };
 
+        // --- 批量抓取追蹤清單報價 ---
+        const fetchWatchlistQuotes = async (watchIds) => {
+            if (!watchIds || watchIds.length === 0) return [];
+            const timestamp = Date.now();
+            
+            const symbols = watchIds.map(id => `${id}.TW,${id}.TWO`).join(',');
+            const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${symbols}&_t=${timestamp}`;
+            
+            const proxies = [
+                { url: `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true`, type: 'wrapped' },
+                { url: `https://corsproxy.io/?${encodeURIComponent(url)}`, type: 'direct' }
+            ];
+
+            for (const proxy of proxies) {
+                try {
+                    const res = await fetch(proxy.url, { cache: 'no-store' });
+                    if (!res.ok) continue;
+                    let parsed;
+                    if (proxy.type === 'wrapped') {
+                        const data = await res.json();
+                        parsed = JSON.parse(data.contents);
+                    } else {
+                        parsed = await res.json();
+                    }
+                    if (parsed.quoteResponse && parsed.quoteResponse.result) {
+                        return parsed.quoteResponse.result;
+                    }
+                } catch(e) {}
+            }
+            return [];
+        };
+
         const fetchWithTimeout = async (url, options = {}, timeout = 30000) => {
             const controller = new AbortController();
             const id = setTimeout(() => controller.abort(), timeout);
@@ -182,13 +214,28 @@
             }
         };
 
+        const getMockData = (symbol, price) => ({
+            name: `${symbol} (安全模式)`, price: String(price), change: "---", percent: "---", industry: "離線防護",
+            market: { taiex: "連線異常", sox: "連線異常", nasdaq: "連線異常" },
+            peers: [{ name: "防護系統A", change: "---" }, { name: "防護系統B", change: "---" }],
+            valuation: { yield: "---", pb: "---", rating: "連線異常", marketCap: "---" },
+            growth: { mom: "---", yoy: "---", forwardPE: "---", grossMargin: "---" },
+            risk: { level: "未知", details: "網路或金鑰狀態異常，啟動安全防護模式。圖表為真實報價，但文字分析已凍結。" },
+            fund: { eps: "---", gross: "---", net: "---", status: "等待網路或金鑰狀態恢復..." },
+            chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "等待狀態恢復..." },
+            moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "無資料。" },
+            tech: { ma: "---", support: "---", pressure: "---" },
+            strategy: { score: 0, conclusion: "安全模式運行中", short: "---", swing: "---", stop: "---" },
+            news: []
+        });
+
         const App = () => {
             const [stockId, setStockId] = useState('2330');
             const [inputValue, setInputValue] = useState('');
             const [customKey, setCustomKey] = useState(() => (localStorage.getItem('groq_api_key') || '').trim());
             const [aiModel, setAiModel] = useState(() => (localStorage.getItem('groq_model_name') || 'llama-3.3-70b-versatile').trim());
             
-            // 追蹤清單狀態管理
+            // 追蹤清單狀態與獨立報價
             const [watchlist, setWatchlist] = useState(() => {
                 try {
                     return JSON.parse(localStorage.getItem('quant_watchlist')) || [
@@ -198,6 +245,8 @@
                     return [{ id: '2330', name: '台積電' }];
                 }
             });
+            const [watchlistQuotes, setWatchlistQuotes] = useState({});
+            const [isWatchlistExpanded, setIsWatchlistExpanded] = useState(true);
             
             const [loading, setLoading] = useState(false);
             const [aiLoading, setAiLoading] = useState(false);
@@ -223,7 +272,6 @@
             const chartRefs = useRef({});
             const seriesRefs = useRef({});
             
-            // 用來掛載圖表的實體 DOM 參考
             const containerRefs = { kline: useRef(null), vol: useRef(null), macd: useRef(null), kdj: useRef(null) };
             
             const isSyncing = useRef(false);
@@ -232,7 +280,7 @@
             const refreshTimer = useRef(null);
             const enrichedDataRef = useRef([]);
 
-            // 追蹤清單功能切換
+            // 追蹤清單邏輯
             const isWatched = watchlist.some(w => w.id === stockId);
             const toggleWatchlist = () => {
                 setWatchlist(prev => {
@@ -247,6 +295,38 @@
                 });
             };
 
+            // 定期更新追蹤清單報價
+            useEffect(() => {
+                let isActive = true;
+                const updateWatchlistQuotes = async () => {
+                    if (watchlist.length === 0) return;
+                    const ids = watchlist.map(w => w.id);
+                    const results = await fetchWatchlistQuotes(ids);
+                    
+                    if (isActive && results && results.length > 0) {
+                        const quotesMap = {};
+                        results.forEach(r => {
+                            const id = r.symbol.split('.')[0];
+                            const close = r.regularMarketPrice;
+                            const prevClose = r.regularMarketPreviousClose || close;
+                            const change = close - prevClose;
+                            const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
+                            quotesMap[id] = {
+                                price: close.toFixed(2),
+                                change: change,
+                                percent: percent.toFixed(2) + '%'
+                            };
+                        });
+                        setWatchlistQuotes(quotesMap);
+                    }
+                };
+                
+                updateWatchlistQuotes();
+                const interval = setInterval(updateWatchlistQuotes, 15000); // 每 15 秒更新一次
+                return () => { isActive = false; clearInterval(interval); };
+            }, [watchlist]);
+
+            // 載入全市場清單
             useEffect(() => {
                 const loadStockList = async () => {
                     try {
@@ -357,7 +437,6 @@
                 chartRefs.current = { kChart, vChart, mChart, kjChart };
                 seriesRefs.current = { kSeries, ma5Series, ma20Series, ma60Series, vSeries, macdDifSeries: mDif, macdDeaSeries: mDea, macdHistSeries: mHist, kdjKSeries: kjK, kdjDSeries: kjD, kdjJSeries: kjJ };
 
-                // 解決 ResizeObserver loop completed with undelivered notifications 錯誤：將 resize 放進 requestAnimationFrame 中處理
                 const resizeObserver = new ResizeObserver(entries => {
                     const updates = entries.map(entry => ({ target: entry.target, width: entry.contentRect.width, height: entry.contentRect.height }));
                     window.requestAnimationFrame(() => {
@@ -506,12 +585,7 @@
                     const cleanKey = customKey ? customKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '') : "";
                     if (!cleanKey) {
                         if(!isRefresh) {
-                            setAiData({ 
-                                name: officialName, price: lastClosePrice, change: rtData?.change||"0", percent: rtData?.percent||"0%", 
-                                market: {taiex:"-",sox:"-",nasdaq:"-"}, peers:[], valuation:{yield:"-",pb:"-",rating:"-", marketCap: rtData?.marketCap || "-"}, 
-                                growth: {mom:"-", yoy:"-", forwardPE:"-", grossMargin:"-"}, risk: {level:"-", details:"請設定金鑰。"},
-                                fund:{status:"請設定 Groq API 金鑰以啟用深度量化分析功能。"}, chips:{status:"-"}, moneyFlow:{inflow:"-", outflow:"-", net:"-", analysis:"-"}, strategy:{score:0}, news:[] 
-                            });
+                            setAiData(getMockData(officialName, lastClosePrice));
                         }
                         setAiLoading(false); setLoading(false);
                         isFetchingRef.current = false;
@@ -559,7 +633,7 @@
                     const prompt = `分析台股代號[${target}]，正式名稱為[${officialName}]。
                     任務：依據最新狀態提供大盤聯動、估值、營收成長、風險預警、籌碼面、資金流向與最新動態。
                     規則：
-                    1. 絕對禁止使用任何表情符號。
+                    1. 絕對禁止使用任何 Emoji 或圖形符號。
                     2. 若在新聞或點評中提及任何實體商品時，務必清楚寫出具體的「品牌」與「型號」。
                     3. 必須且只能回傳 JSON 格式。請直接輸出 JSON 大括號，不要包含 Markdown 標籤。
                     JSON結構：{"name":"${officialName}","price":"現價","change":"漲跌","percent":"幅度","industry":"產業","market":{"taiex":"大盤","sox":"費半","nasdaq":"那指"},"peers":[{"name":"同業","change":"漲跌"}],"valuation":{"yield":"殖利率","pb":"股淨比","rating":"評價","marketCap":"總市值"},"growth":{"mom":"月營收增減","yoy":"年營收增減","forwardPE":"預估本益比","grossMargin":"最新毛利率"},"risk":{"level":"高/中/低","details":"風險與事件說明"},"fund":{"eps":"EPS","gross":"毛利","net":"淨利","status":"點評"},"chips":{"foreign":"外資","trust":"投信","big":"主力","retail":"散戶","status":"點評"},"moneyFlow":{"inflow":"流入預估","outflow":"流出預估","net":"淨流入流出","analysis":"資金面點評"},"tech":{"ma":"均線","support":"支撐","pressure":"壓力"},"strategy":{"score":85,"conclusion":"判定","short":"短線","swing":"策略","stop":"停損"},"news":[{"date":"日期","title":"標題","snippet":"新聞內容詳細預覽摘要","impact":"多空"}]}`;
@@ -615,9 +689,9 @@
                     localStorage.setItem(cacheKey, JSON.stringify({ timestamp: nowMs, data: safeAiData }));
 
                 } catch (e) { 
-                    const mockData = getMockData(target, "---");
+                    const mockData = getMockData(target, lastClosePrice);
                     setAiData(mockData);
-                    if(!isRefresh) setError(`分析防護機制啟動：${e.message}`); 
+                    if(!isRefresh) setError(`防護機制啟動：${e.message}`); 
                 } finally { 
                     setAiLoading(false); 
                     setLoading(false);
@@ -754,21 +828,41 @@
                         {/* 左側：自選、聯動、同業、估值、成長 */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-3 overflow-y-auto custom-scrollbar pr-1 pb-2">
                             
-                            {/* 追蹤清單面板 */}
-                            <div className="panel-card flex-none animate-fade-up">
-                                <div className="bg-yellow-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl">
+                            {/* 直式自選追蹤清單面板 (可隱藏/展開動畫) */}
+                            <div className="panel-card flex-none animate-fade-up transition-all duration-500 overflow-hidden">
+                                <div 
+                                    className="bg-yellow-950/20 border-b border-white/5 p-2.5 px-4 rounded-t-xl flex justify-between items-center cursor-pointer hover:bg-yellow-900/30 transition-colors"
+                                    onClick={() => setIsWatchlistExpanded(!isWatchlistExpanded)}
+                                >
                                     <span className="text-yellow-400 font-bold text-xs tracking-widest uppercase">自選追蹤清單</span>
+                                    <span className="text-gray-500 transform transition-transform duration-300 select-none text-[10px]" style={{ transform: isWatchlistExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>▼</span>
                                 </div>
-                                <div className="p-3 flex flex-wrap gap-2">
-                                    {watchlist.length > 0 ? watchlist.map((item) => (
-                                        <button 
-                                            key={item.id} 
-                                            onClick={() => executeJump(item.id)}
-                                            className={`px-3 py-1.5 text-xs font-bold font-mono rounded border transition-colors ${stockId === item.id ? 'bg-blue-900/40 border-blue-500 text-blue-200' : 'bg-black/40 border-white/10 text-gray-400 hover:bg-white/5'}`}
-                                        >
-                                            {item.name}
-                                        </button>
-                                    )) : <span className="text-gray-600 text-xs p-2">尚無追蹤標的</span>}
+                                <div 
+                                    className={`transition-all duration-500 ease-in-out bg-black/20 ${isWatchlistExpanded ? 'max-h-[300px] opacity-100' : 'max-h-0 opacity-0'}`}
+                                >
+                                    <div className="p-2 flex flex-col gap-1 overflow-y-auto custom-scrollbar" style={{ maxHeight: '250px' }}>
+                                        {watchlist.length > 0 ? watchlist.map((item) => {
+                                            const quote = watchlistQuotes[item.id];
+                                            const isWUp = quote && quote.change >= 0;
+                                            const colorClass = !quote ? 'text-gray-500' : isWUp ? 'text-red-400' : 'text-green-400';
+                                            return (
+                                                <div 
+                                                    key={item.id} 
+                                                    onClick={() => executeJump(item.id)}
+                                                    className={`flex justify-between items-center p-2 rounded-lg cursor-pointer transition-all duration-200 border ${stockId === item.id ? 'bg-white/10 border-white/20 shadow-inner' : 'bg-transparent border-transparent hover:bg-white/5'}`}
+                                                >
+                                                    <div className="flex flex-col">
+                                                        <span className="text-white font-bold text-xs">{item.name}</span>
+                                                        <span className="text-gray-500 font-mono text-[9px]">{item.id}</span>
+                                                    </div>
+                                                    <div className="flex flex-col items-end">
+                                                        <span className={`font-mono font-bold text-xs ${colorClass}`}>{quote ? quote.price : '---'}</span>
+                                                        <span className={`font-mono text-[10px] ${colorClass}`}>{quote ? (isWUp ? '+' : '') + quote.percent : '---'}</span>
+                                                    </div>
+                                                </div>
+                                            );
+                                        }) : <span className="text-gray-600 text-xs p-3 text-center block">尚無追蹤標的</span>}
+                                    </div>
                                 </div>
                             </div>
 
@@ -824,14 +918,13 @@
                             </div>
                         </div>
 
-                        {/* 中間圖表區塊：自適應 Flex 佈局 (完全解決被切掉的問題) */}
+                        {/* 中間圖表區塊：自適應 Flex 佈局 */}
                         <div className="col-span-12 lg:col-span-6 flex flex-col overflow-hidden pb-2">
                             <div className="panel-card flex-1 flex flex-col overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.8)] animate-fade-up delay-100">
                                 
                                 <div className="bg-green-950/10 border-b border-white/5 p-3 px-5 flex justify-between items-center z-10 h-14 rounded-t-xl flex-none">
                                     <div className="flex items-center gap-4">
                                         <span className="text-green-400 font-bold text-sm tracking-widest uppercase">技術線圖</span>
-                                        {/* 即時盤中數據 (顯示張數) */}
                                         <div className="hidden sm:flex items-center gap-3 text-[10px] font-mono text-gray-400 bg-black/40 px-3 py-1.5 rounded-lg border border-white/5">
                                             <span>開: <strong className="text-white">{stockDetails.open || '-'}</strong></span>
                                             <span>高: <strong className="text-red-400">{stockDetails.high || '-'}</strong></span>
@@ -845,7 +938,6 @@
                                     </div>
                                 </div>
 
-                                {/* 解決方案：父層設定 h-0 以允許 flex 子元件按照比例縮放而不溢出 */}
                                 <div className="flex-1 bg-black/30 flex flex-col h-0 overflow-hidden p-1">
                                     {(!loading && chartData.length === 0 && !error) ? (
                                         <div className="absolute inset-0 flex flex-col justify-center items-center z-20 bg-black/80 backdrop-blur-sm">
