@@ -229,6 +229,7 @@
             const [animationKey, setAnimationKey] = useState(0);
 
             const rootRef = useRef(null);
+            const inputRef = useRef(null); // 修復這行
             const chartRefs = useRef({});
             const seriesRefs = useRef({});
             const containerRefs = { kline: useRef(null), vol: useRef(null), macd: useRef(null), kdj: useRef(null) };
@@ -441,7 +442,7 @@
                     }
 
                     const d = new Date(); d.setFullYear(d.getFullYear()-1);
-                    const historyRes = await fetch(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`);
+                    const historyRes = await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`);
                     const hJson = await historyRes.json();
                     
                     let historyCache = [];
