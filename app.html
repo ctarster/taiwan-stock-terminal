@@ -357,15 +357,17 @@
                 chartRefs.current = { kChart, vChart, mChart, kjChart };
                 seriesRefs.current = { kSeries, ma5Series, ma20Series, ma60Series, vSeries, macdDifSeries: mDif, macdDeaSeries: mDea, macdHistSeries: mHist, kdjKSeries: kjK, kdjDSeries: kjD, kdjJSeries: kjJ };
 
-                // ResizeObserver 動態擷取父層高度並套用
+                // 解決 ResizeObserver loop completed with undelivered notifications 錯誤：將 resize 放進 requestAnimationFrame 中處理
                 const resizeObserver = new ResizeObserver(entries => {
-                    for (let entry of entries) {
-                        const { width, height } = entry.contentRect;
-                        if (entry.target === containerRefs.kline.current && chartRefs.current.kChart) chartRefs.current.kChart.applyOptions({ width, height });
-                        if (entry.target === containerRefs.vol.current && chartRefs.current.vChart) chartRefs.current.vChart.applyOptions({ width, height });
-                        if (entry.target === containerRefs.macd.current && chartRefs.current.mChart) chartRefs.current.mChart.applyOptions({ width, height });
-                        if (entry.target === containerRefs.kdj.current && chartRefs.current.kjChart) chartRefs.current.kjChart.applyOptions({ width, height });
-                    }
+                    const updates = entries.map(entry => ({ target: entry.target, width: entry.contentRect.width, height: entry.contentRect.height }));
+                    window.requestAnimationFrame(() => {
+                        for (let { target, width, height } of updates) {
+                            if (target === containerRefs.kline.current && chartRefs.current.kChart) chartRefs.current.kChart.applyOptions({ width, height });
+                            if (target === containerRefs.vol.current && chartRefs.current.vChart) chartRefs.current.vChart.applyOptions({ width, height });
+                            if (target === containerRefs.macd.current && chartRefs.current.mChart) chartRefs.current.mChart.applyOptions({ width, height });
+                            if (target === containerRefs.kdj.current && chartRefs.current.kjChart) chartRefs.current.kjChart.applyOptions({ width, height });
+                        }
+                    });
                 });
 
                 resizeObserver.observe(containerRefs.kline.current);
@@ -439,7 +441,6 @@
                 }
             }, [timeframe, chartData, initCharts, updateChartData]);
 
-            // --- AI 深度分析邏輯 ---
             const executeAnalysis = useCallback(async (target, isRefresh = false) => {
                 if (!target || isFetchingRef.current) return;
                 isFetchingRef.current = true;
@@ -474,11 +475,16 @@
 
                     if (historyCache.length > 0) {
                         const latest = historyCache[historyCache.length-1];
+                        
                         if (rtData) {
                             lastClosePrice = rtData.price;
                             currentDataState = {
-                                open: Number(rtData.open).toFixed(2), high: Number(rtData.high).toFixed(2), low: Number(rtData.low).toFixed(2), volume: Math.round(rtData.volume / 1000)
+                                open: Number(rtData.open).toFixed(2), 
+                                high: Number(rtData.high).toFixed(2), 
+                                low: Number(rtData.low).toFixed(2), 
+                                volume: Math.round(rtData.volume / 1000)
                             };
+                            
                             const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
                             if (latest.time < todayStr) {
                                 historyCache.push({ time: todayStr, open: rtData.open, high: rtData.high, low: rtData.low, close: rtData.close, volume: rtData.volume });
@@ -488,8 +494,11 @@
                             }
                         } else {
                             lastClosePrice = latest.close.toString();
-                            currentDataState = { open: Number(latest.open).toFixed(2), high: Number(latest.high).toFixed(2), low: Number(latest.low).toFixed(2), volume: Math.round(latest.volume / 1000) };
+                            currentDataState = {
+                                open: Number(latest.open).toFixed(2), high: Number(latest.high).toFixed(2), low: Number(latest.low).toFixed(2), volume: Math.round(latest.volume / 1000)
+                            };
                         }
+                        
                         setChartData([...historyCache]);
                         setStockDetails(currentDataState);
                     }
@@ -501,10 +510,12 @@
                                 name: officialName, price: lastClosePrice, change: rtData?.change||"0", percent: rtData?.percent||"0%", 
                                 market: {taiex:"-",sox:"-",nasdaq:"-"}, peers:[], valuation:{yield:"-",pb:"-",rating:"-", marketCap: rtData?.marketCap || "-"}, 
                                 growth: {mom:"-", yoy:"-", forwardPE:"-", grossMargin:"-"}, risk: {level:"-", details:"請設定金鑰。"},
-                                fund:{status:"請輸入有效的 Groq API 金鑰並查詢，以獲取深度解析。"}, chips:{status:"-"}, moneyFlow:{inflow:"-", outflow:"-", net:"-", analysis:"-"}, strategy:{score:0}, news:[] 
+                                fund:{status:"請設定 Groq API 金鑰以啟用深度量化分析功能。"}, chips:{status:"-"}, moneyFlow:{inflow:"-", outflow:"-", net:"-", analysis:"-"}, strategy:{score:0}, news:[] 
                             });
                         }
-                        setAiLoading(false); setLoading(false); isFetchingRef.current = false; return; 
+                        setAiLoading(false); setLoading(false);
+                        isFetchingRef.current = false;
+                        return; 
                     }
 
                     const nowMs = Date.now();
@@ -517,11 +528,15 @@
                             if (nowMs - parsedCache.timestamp < 14400000) { 
                                 const cachedData = parsedCache.data;
                                 if (rtData) {
-                                    cachedData.price = rtData.price; cachedData.change = rtData.change; cachedData.percent = rtData.percent;
+                                    cachedData.price = rtData.price;
+                                    cachedData.change = rtData.change;
+                                    cachedData.percent = rtData.percent;
                                     if(rtData.marketCap && rtData.marketCap !== "---") cachedData.valuation.marketCap = rtData.marketCap;
                                 }
                                 setAiData(cachedData);
-                                setAiLoading(false); setLoading(false); isFetchingRef.current = false; return; 
+                                setAiLoading(false); setLoading(false);
+                                isFetchingRef.current = false;
+                                return; 
                             }
                         } catch (e) {}
                     }
@@ -534,29 +549,31 @@
                                 return newD;
                             });
                         }
-                        setAiLoading(false); setLoading(false); isFetchingRef.current = false; return;
+                        setAiLoading(false); setLoading(false);
+                        isFetchingRef.current = false;
+                        return;
                     }
 
                     const safeModel = aiModel ? aiModel.replace(/[^a-z0-9.-]/gi, '') : "llama-3.3-70b-versatile";
                     
-                    // 新增 snippet 欄位，嚴格要求無 Emoji 與品牌型號要求
                     const prompt = `分析台股代號[${target}]，正式名稱為[${officialName}]。
                     任務：依據最新狀態提供大盤聯動、估值、營收成長、風險預警、籌碼面、資金流向與最新動態。
                     規則：
-                    1. 絕對禁止使用任何表情符號 (Emoji)。
-                    2. 若在新聞或點評中推薦或提及任何實體商品時，務必清楚寫出具體的「品牌」與「型號」。
+                    1. 絕對禁止使用任何表情符號。
+                    2. 若在新聞或點評中提及任何實體商品時，務必清楚寫出具體的「品牌」與「型號」。
                     3. 必須且只能回傳 JSON 格式。請直接輸出 JSON 大括號，不要包含 Markdown 標籤。
                     JSON結構：{"name":"${officialName}","price":"現價","change":"漲跌","percent":"幅度","industry":"產業","market":{"taiex":"大盤","sox":"費半","nasdaq":"那指"},"peers":[{"name":"同業","change":"漲跌"}],"valuation":{"yield":"殖利率","pb":"股淨比","rating":"評價","marketCap":"總市值"},"growth":{"mom":"月營收增減","yoy":"年營收增減","forwardPE":"預估本益比","grossMargin":"最新毛利率"},"risk":{"level":"高/中/低","details":"風險與事件說明"},"fund":{"eps":"EPS","gross":"毛利","net":"淨利","status":"點評"},"chips":{"foreign":"外資","trust":"投信","big":"主力","retail":"散戶","status":"點評"},"moneyFlow":{"inflow":"流入預估","outflow":"流出預估","net":"淨流入流出","analysis":"資金面點評"},"tech":{"ma":"均線","support":"支撐","pressure":"壓力"},"strategy":{"score":85,"conclusion":"判定","short":"短線","swing":"策略","stop":"停損"},"news":[{"date":"日期","title":"標題","snippet":"新聞內容詳細預覽摘要","impact":"多空"}]}`;
 
                     const apiUrl = `https://api.groq.com/openai/v1/chat/completions`;
+
                     const aiRes = await fetchWithTimeout(apiUrl, {
                         method: 'POST', 
                         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cleanKey}` },
                         body: JSON.stringify({ 
-                            model: safeModel, temperature: 0.2, // 微調參數避免死板
+                            model: safeModel, temperature: 0.2,
                             messages: [
                                 { role: "system", content: prompt },
-                                { role: "user", content: `請提供台股 [${target}] 的深度分析數據，直接輸出純 JSON。` }
+                                { role: "user", content: `提供台股 [${target}] 分析數據，輸出純 JSON。` }
                             ]
                         })
                     }, 20000);
@@ -627,7 +644,9 @@
 
             const isUp = aiData?.change && !String(aiData.change).includes('-');
             const priceColor = !aiData?.change || String(aiData.change) === '0' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
+            
             const zenClass = zenMode ? "fixed inset-0 z-[9999] bg-[#030303] p-2 lg:p-4" : "";
+            const headerStatus = aiData?.name || (aiLoading ? '系統啟動中' : '等待輸入');
             const disableInput = aiLoading;
 
             return (
@@ -638,7 +657,7 @@
                         <div className="flex flex-col lg:flex-row lg:items-center gap-4 w-full lg:w-auto">
                             <div className="flex items-center gap-4">
                                 <div className="flex flex-col animate-fade-in">
-                                    <h1 className="text-xl font-bold text-white tracking-tighter">{aiData?.name || '系統啟動中'}</h1>
+                                    <h1 className="text-xl font-bold text-white tracking-tighter">{headerStatus}</h1>
                                     <span className="text-blue-500 font-mono text-sm uppercase tracking-widest">{stockId}</span>
                                 </div>
                                 <div className="h-8 w-px bg-white/10 mx-2 hidden lg:block animate-fade-in delay-50"></div>
@@ -774,7 +793,7 @@
                                 <div className="p-4 space-y-2 text-xs">
                                     {aiData?.peers && aiData.peers.length > 0 ? (
                                         aiData.peers.map((p, i) => (
-                                            <div key={i} className="flex justify-between bg-black/40 p-3 mb-2 rounded-lg border border-white/5 font-mono">
+                                            <div key={i} className="flex justify-between bg-black/40 p-3 mb-2 rounded-lg border border-white/5 font-mono hover:bg-white/10 transition-colors">
                                                 <span className="text-gray-200 font-bold">{p.name}</span>
                                                 <span className={p.change && String(p.change).includes('-') ? 'text-green-400' : 'text-red-400'}>{p.change}</span>
                                             </div>
@@ -812,6 +831,7 @@
                                 <div className="bg-green-950/10 border-b border-white/5 p-3 px-5 flex justify-between items-center z-10 h-14 rounded-t-xl flex-none">
                                     <div className="flex items-center gap-4">
                                         <span className="text-green-400 font-bold text-sm tracking-widest uppercase">技術線圖</span>
+                                        {/* 即時盤中數據 (顯示張數) */}
                                         <div className="hidden sm:flex items-center gap-3 text-[10px] font-mono text-gray-400 bg-black/40 px-3 py-1.5 rounded-lg border border-white/5">
                                             <span>開: <strong className="text-white">{stockDetails.open || '-'}</strong></span>
                                             <span>高: <strong className="text-red-400">{stockDetails.high || '-'}</strong></span>
