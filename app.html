@@ -109,16 +109,22 @@
         // --- 強固型多重代理請求引擎 ---
         const fetchWithProxy = async (url) => {
             const proxies = [
+                { url: `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, type: 'wrapped' },
                 { url: `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, type: 'raw' },
-                { url: `https://corsproxy.io/?${encodeURIComponent(url)}`, type: 'raw' },
-                { url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, type: 'raw' }
+                { url: `https://corsproxy.io/?${encodeURIComponent(url)}`, type: 'raw' }
             ];
 
             for (const proxy of proxies) {
                 try {
                     const res = await fetch(proxy.url, { cache: 'no-store' });
                     if (!res.ok) continue;
-                    return await res.json();
+
+                    if (proxy.type === 'wrapped') {
+                        const data = await res.json();
+                        if (data.contents) return JSON.parse(data.contents);
+                    } else {
+                        return await res.json();
+                    }
                 } catch (e) { }
             }
             throw new Error("代理伺服器皆無回應");
@@ -166,20 +172,49 @@
             return [];
         };
 
-        // --- 批量抓取追蹤清單報價 ---
-        const fetchWatchlistQuotes = async (watchIds) => {
-            if (!watchIds || watchIds.length === 0) return [];
+        // --- 真實 Yahoo 即時報價與市值 ---
+        const fetchRealTimeYahoo = async (target) => {
             const timestamp = Date.now();
-            const symbols = watchIds.map(id => `${id}.TW,${id}.TWO`).join(',');
-            const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${symbols}&_t=${timestamp}`;
+            const urls = [
+                `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}.TW&_t=${timestamp}`,
+                `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}.TWO&_t=${timestamp}`
+            ];
             
-            try {
-                const data = await fetchWithProxy(url);
-                if (data.quoteResponse && data.quoteResponse.result) {
-                    return data.quoteResponse.result;
-                }
-            } catch (e) {}
-            return [];
+            for (let url of urls) {
+                try {
+                    const data = await fetchWithProxy(url);
+                    const result = data.quoteResponse?.result?.[0];
+                    if (!result || !result.regularMarketPrice) continue;
+                    
+                    const close = result.regularMarketPrice;
+                    const prevClose = result.regularMarketPreviousClose || close; 
+                    const change = close - prevClose;
+                    const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
+                    
+                    const open = result.regularMarketOpen || close;
+                    const high = result.regularMarketDayHigh || close;
+                    const low = result.regularMarketDayLow || close;
+                    const volume = result.regularMarketVolume || 0;
+                    
+                    let marketCapStr = "---";
+                    if (result.marketCap) {
+                        if (result.marketCap >= 1000000000000) {
+                            marketCapStr = (result.marketCap / 1000000000000).toFixed(2) + " 兆";
+                        } else {
+                            marketCapStr = (result.marketCap / 100000000).toFixed(2) + " 億";
+                        }
+                    }
+                    
+                    return {
+                        price: close.toFixed(2),
+                        change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
+                        percent: (change > 0 ? '+' : '') + percent.toFixed(2) + '%',
+                        open: open, high: high, low: low, close: close, volume: volume,
+                        marketCap: marketCapStr
+                    };
+                } catch (e) {}
+            }
+            return null;
         };
 
         const fetchWithTimeout = async (url, options = {}, timeout = 30000) => {
@@ -195,6 +230,21 @@
                 throw e;
             }
         };
+
+        const getMockData = (symbol, price) => ({
+            name: `${symbol}`, price: String(price), change: "---", percent: "---", industry: "尚未設定金鑰",
+            market: { taiex: "等待同步", sox: "等待同步", nasdaq: "等待同步" },
+            peers: [],
+            valuation: { yield: "---", pb: "---", rating: "---", marketCap: "---" },
+            growth: { mom: "---", yoy: "---", forwardPE: "---", grossMargin: "---" },
+            risk: { level: "---", details: "請點擊右上角「設定」輸入您的 Groq API 金鑰，以解鎖 AI 深度分析與即時情報功能。目前為基礎報價模式。" },
+            fund: { eps: "---", gross: "---", net: "---", status: "等待 AI 分析連線..." },
+            chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "等待分析連線..." },
+            moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "無資料。" },
+            tech: { ma: "---", support: "---", pressure: "---" },
+            strategy: { score: 0, conclusion: "等待設定", short: "---", swing: "---", stop: "---" },
+            news: []
+        });
 
         const App = () => {
             const [stockId, setStockId] = useState('2330');
@@ -234,7 +284,6 @@
             const [isFullScreen, setIsFullScreen] = useState(false);
             const [zenMode, setZenMode] = useState(false);
             const [showSettings, setShowSettings] = useState(false);
-            const [animationKey, setAnimationKey] = useState(0);
 
             const rootRef = useRef(null);
             const inputRef = useRef(null); 
@@ -263,30 +312,24 @@
                 });
             };
 
-            // 安全批量抓取追蹤清單即時報價
+            // 原子化安全批量抓取追蹤清單即時報價 (保證 UI 更新)
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
                     if (watchlist.length === 0) return;
-                    
-                    const ids = watchlist.map(w => w.id);
-                    const results = await fetchWatchlistQuotes(ids);
-                    
-                    if (isActive && results && results.length > 0) {
-                        const quotesMap = {};
-                        results.forEach(r => {
-                            const id = r.symbol.split('.')[0];
-                            const close = r.regularMarketPrice;
-                            const prevClose = r.regularMarketPreviousClose || close;
-                            const change = close - prevClose;
-                            const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
-                            quotesMap[id] = {
-                                price: close.toFixed(2),
-                                change: change,
-                                percent: percent.toFixed(2) + '%'
-                            };
-                        });
-                        setWatchlistQuotes(prev => ({ ...prev, ...quotesMap }));
+                    for (const item of watchlist) {
+                        if (!isActive) break;
+                        try {
+                            const rtData = await fetchRealTimeYahoo(item.id);
+                            if (rtData) {
+                                setWatchlistQuotes(prev => ({
+                                    ...prev,
+                                    [item.id]: { price: rtData.price, change: rtData.change, percent: rtData.percent }
+                                }));
+                            }
+                        } catch(e){}
+                        // 加入小延遲，防止被 Yahoo 或 Proxy 伺服器阻擋
+                        await new Promise(r => setTimeout(r, 200)); 
                     }
                 };
                 
@@ -338,11 +381,14 @@
                 executeJump(id);
             };
 
+            // 無縫切換 (拔除破壞 DOM 的 animationKey)
             const executeJump = useCallback((targetId) => {
-                if (targetId === stockId) return;
+                if (targetId === stockId) {
+                    executeAnalysis(targetId, true);
+                } else {
+                    setStockId(targetId);
+                }
                 setShowSuggestions(false);
-                setAnimationKey(prev => prev + 1); 
-                setStockId(targetId);
             }, [stockId]);
 
             const handleSearch = useCallback(async () => {
@@ -378,7 +424,7 @@
                 return () => document.removeEventListener('fullscreenchange', fn);
             }, []);
 
-            // --- 完美自適應圖表 (解決 KDJ 裁切) ---
+            // --- 圖表初始化 (安全 ResizeObserver 防止崩潰) ---
             const initCharts = useCallback(() => {
                 if (!window.LightweightCharts || isChartInitialized.current || !containerRefs.kline.current) return;
                 
@@ -452,6 +498,7 @@
                 isChartInitialized.current = true;
             }, []);
 
+            // 修復時間軸重複導致當機的圖表更新邏輯
             const updateChartData = useCallback((historyArray) => {
                 if (!isChartInitialized.current) return;
                 const s = seriesRefs.current;
@@ -466,7 +513,7 @@
                     return;
                 }
 
-                // 時間去重避免崩潰
+                // 嚴格過濾重複的時間點
                 const sorted = [...historyArray].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
                 const uniqueHistory = [];
                 const seen = new Set();
@@ -520,11 +567,10 @@
 
             // --- 執行分析與資料抓取 (原生 Groq API) ---
             const executeAnalysis = useCallback(async (target, isRefresh = false) => {
-                if (!target || isFetchingRef.current) return;
-                isFetchingRef.current = true;
+                if (!target) return;
 
                 if (!isRefresh) {
-                    setLoading(true); setAiLoading(true); setError(null); setAiData(null); setChartData([]); setHoverData(null);
+                    setLoading(true); setAiLoading(true); setError(null); setChartData([]); setHoverData(null);
                     setLiveQuote({ price: '---', change: '---', percent: '---' });
                 }
                 
@@ -539,44 +585,16 @@
                         if (stock) officialName = stock.stock_name;
                     }
 
-                    // 強制抓取歷史與即時數據
                     let historyCache = await fetchHistoryData(target);
-                    
-                    const timestamp = Date.now();
-                    const urls = [
-                        `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}.TW&_t=${timestamp}`,
-                        `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}.TWO&_t=${timestamp}`
-                    ];
-                    for (let url of urls) {
-                        try {
-                            const data = await fetchWithProxy(url);
-                            const result = data.quoteResponse?.result?.[0];
-                            if (result && result.regularMarketPrice) {
-                                const close = result.regularMarketPrice;
-                                const prevClose = result.regularMarketPreviousClose || close; 
-                                const change = close - prevClose;
-                                const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
-                                rtData = {
-                                    price: close.toFixed(2),
-                                    change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
-                                    percent: (change > 0 ? '+' : '') + percent.toFixed(2) + '%',
-                                    open: result.regularMarketOpen || close,
-                                    high: result.regularMarketDayHigh || close,
-                                    low: result.regularMarketDayLow || close,
-                                    volume: result.regularMarketVolume || 0,
-                                    marketCap: result.marketCap ? (result.marketCap >= 1000000000000 ? (result.marketCap / 1000000000000).toFixed(2) + " 兆" : (result.marketCap / 100000000).toFixed(2) + " 億") : "---"
-                                };
-                                break;
-                            }
-                        } catch(e){}
-                    }
+                    try { rtData = await fetchRealTimeYahoo(target); } catch(e) {}
 
                     if (historyCache && historyCache.length > 0) {
                         const latest = historyCache[historyCache.length-1];
                         if (rtData) {
                             lastClosePrice = rtData.price;
-                            currentDataState = { open: Number(rtData.open).toFixed(2), high: Number(rtData.high).toFixed(2), low: Number(rtData.low).toFixed(2), volume: Math.round(rtData.volume / 1000) };
-                            
+                            currentDataState = {
+                                open: Number(rtData.open).toFixed(2), high: Number(rtData.high).toFixed(2), low: Number(rtData.low).toFixed(2), volume: Math.round(rtData.volume / 1000)
+                            };
                             const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
                             if (latest.time < todayStr) {
                                 historyCache.push({ time: todayStr, open: rtData.open, high: rtData.high, low: rtData.low, close: rtData.close, volume: rtData.volume });
@@ -587,7 +605,9 @@
                             setLiveQuote({ price: rtData.price, change: rtData.change, percent: rtData.percent });
                         } else {
                             lastClosePrice = latest.close.toString();
-                            currentDataState = { open: Number(latest.open).toFixed(2), high: Number(latest.high).toFixed(2), low: Number(latest.low).toFixed(2), volume: Math.round(latest.volume / 1000) };
+                            currentDataState = {
+                                open: Number(latest.open).toFixed(2), high: Number(latest.high).toFixed(2), low: Number(latest.low).toFixed(2), volume: Math.round(latest.volume / 1000)
+                            };
                             if (historyCache.length >= 2) {
                                 const prev = historyCache[historyCache.length - 2];
                                 const diff = latest.close - prev.close;
@@ -602,26 +622,23 @@
                         setStockDetails(currentDataState);
                     } else if (rtData) {
                         lastClosePrice = rtData.price;
-                        currentDataState = { open: Number(rtData.open).toFixed(2), high: Number(rtData.high).toFixed(2), low: Number(rtData.low).toFixed(2), volume: Math.round(rtData.volume / 1000) };
+                        currentDataState = {
+                            open: Number(rtData.open).toFixed(2), high: Number(rtData.high).toFixed(2), low: Number(rtData.low).toFixed(2), volume: Math.round(rtData.volume / 1000)
+                        };
                         setStockDetails(currentDataState);
                         setLiveQuote({ price: rtData.price, change: rtData.change, percent: rtData.percent });
                         setChartData([{ time: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date()), open: rtData.open, high: rtData.high, low: rtData.low, close: rtData.close, volume: rtData.volume }]);
+                    } else {
+                        // 如果完全沒有資料，清除圖表並報錯
+                        setChartData([]);
+                        throw new Error(`無法取得標的 [${target}] 的任何報價。`);
                     }
 
-                    // 確保使用 Groq API 金鑰
                     const cleanKey = customKey ? customKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '') : "";
                     if (!cleanKey) {
                         if(!isRefresh) {
-                            const fallback = {
-                                name: officialName, industry: "---",
-                                market: { taiex: "等候連線", sox: "等候連線", nasdaq: "等候連線" }, peers: [],
-                                valuation: { yield: "---", pb: "---", rating: "---", marketCap: rtData?.marketCap || "---" },
-                                growth: { mom: "---", yoy: "---", forwardPE: "---", grossMargin: "---" },
-                                risk: { level: "---", details: "請點擊右上角「設定」填入您的 Groq API 金鑰以啟用分析功能。圖表為真實即時報價。" },
-                                fund: { eps: "---", gross: "---", net: "---", status: "等待金鑰..." }, chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "等待金鑰..." },
-                                moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "等待金鑰..." }, tech: { ma: "---", support: "---", pressure: "---" },
-                                strategy: { score: 0, conclusion: "等待連線", short: "---", swing: "---", stop: "---" }, news: []
-                            };
+                            const fallback = getMockData(officialName, lastClosePrice);
+                            if(rtData && rtData.marketCap) fallback.valuation.marketCap = rtData.marketCap;
                             setAiData(fallback);
                         }
                         setAiLoading(false); setLoading(false); isFetchingRef.current = false; return; 
@@ -649,7 +666,6 @@
                     
                     const safeModel = aiModel ? aiModel.replace(/[^a-z0-9.-]/gi, '') : "llama-3.3-70b-versatile";
                     
-                    // 強制 AI 必須輸出判斷值，嚴禁輸出 Emoji 與留白
                     const prompt = `分析台股代號[${target}]，正式名稱為[${officialName}]。
                     任務：依據最新狀態提供大盤聯動、估值、營收成長、風險預警、籌碼面、資金流向與最新動態。
                     【絕對強制規則】：
@@ -708,7 +724,6 @@
                     localStorage.setItem(cacheKey, JSON.stringify({ timestamp: nowMs, data: safeAiData }));
 
                 } catch (e) { 
-                    // 防護機制：AI 失敗時強迫保留報價
                     const fallbackData = {
                         name: officialName, industry: "---",
                         market: { taiex: "連線異常", sox: "連線異常", nasdaq: "連線異常" }, peers: [],
@@ -749,11 +764,10 @@
             const disableInput = aiLoading;
 
             return (
-                <div key={animationKey} ref={rootRef} className={`min-h-screen bg-[#030303] text-gray-200 font-sans p-1.5 lg:p-3 overflow-hidden flex flex-col ${zenClass}`}>
+                <div className={`min-h-screen bg-[#030303] text-gray-200 font-sans p-1.5 lg:p-3 overflow-hidden flex flex-col ${zenClass}`} ref={rootRef}>
                     
                     <div className="flex-1 flex flex-col overflow-hidden w-full h-full animate-fade-in">
                         
-                        {/* 頂部標頭列 - 直接綁定 liveQuote 保證精準 */}
                         <header className="flex-none flex flex-col md:flex-row justify-between items-center mb-2 lg:mb-3 bg-[#0a0a0a] p-3 lg:p-4 border border-white/5 rounded-xl shadow-[0_4px_20px_rgba(0,0,0,0.5)] relative header-glow">
                             <div className="flex flex-col lg:flex-row lg:items-center gap-4 w-full lg:w-auto">
                                 <div className="flex items-center gap-4">
@@ -773,13 +787,11 @@
                             </div>
 
                             <div className="flex items-center gap-2 mt-4 md:mt-0 w-full lg:w-auto justify-end relative animate-fade-in delay-150">
-                                {aiLoading ? <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mr-2"></div> : null}
                                 
                                 <button onClick={toggleWatchlist} className={`px-3 py-2 text-xs font-bold rounded-lg transition-colors border ${isWatched ? 'bg-yellow-900/40 border-yellow-700 text-yellow-300' : 'bg-gray-800 border-gray-600 text-gray-400 hover:bg-gray-700 hover:text-white'}`}>
                                     {isWatched ? '取消追蹤' : '加入追蹤'}
                                 </button>
 
-                                {/* 智慧搜尋框容器 */}
                                 <div className="relative" ref={inputRef}>
                                     <input 
                                         type="text" 
@@ -852,10 +864,8 @@
 
                         <main className={`flex-1 grid grid-cols-1 lg:grid-cols-12 gap-2 lg:gap-3 overflow-hidden ${(isFullScreen || zenMode) ? 'h-full' : ''}`}>
                             
-                            {/* 左側：自選、聯動、同業、估值、成長 */}
                             <div className="col-span-12 lg:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-1 pb-1">
                                 
-                                {/* 直式自選追蹤清單面板 (可隱藏/展開動畫) */}
                                 <div className="panel-card flex-none animate-fade-up transition-all duration-500 overflow-hidden border-yellow-900/30">
                                     <div className="bg-yellow-950/20 border-b border-white/5 p-3 px-4 flex justify-between items-center cursor-pointer hover:bg-yellow-900/30 transition-colors" onClick={() => setIsWatchlistExpanded(!isWatchlistExpanded)}>
                                         <span className="text-yellow-400 font-bold text-xs tracking-widest uppercase">自選追蹤清單</span>
@@ -936,9 +946,9 @@
                                 </div>
                             </div>
 
-                            {/* 中間圖表區塊：自適應 Flex H-0 絕對填滿不溢出 */}
-                            <div className="col-span-12 lg:col-span-6 flex flex-col overflow-hidden pb-1 min-h-[600px] lg:min-h-0">
-                                <div className="panel-card flex-1 flex flex-col overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.8)] animate-fade-up delay-100">
+                            {/* 中間圖表區塊：包含載入動畫 */}
+                            <div className="col-span-12 lg:col-span-6 flex flex-col overflow-hidden pb-1">
+                                <div className="panel-card flex-1 flex flex-col overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.8)] animate-fade-up delay-100 relative">
                                     
                                     <div className="bg-green-950/10 border-b border-white/5 p-3 px-5 flex justify-between items-center z-10 h-14 rounded-t-xl flex-none">
                                         <div className="flex items-center gap-4">
@@ -956,20 +966,15 @@
                                         </div>
                                     </div>
 
-                                    {/* 核心佈局修復：flex-1 h-0 保證子元件等比例縮放不被裁切 */}
-                                    <div className="flex-1 bg-black/30 flex flex-col h-0 overflow-hidden p-1">
-                                        {(!loading && chartData.length === 0 && !error) ? (
-                                            <div className="absolute inset-0 flex flex-col justify-center items-center z-20 bg-black/80 backdrop-blur-sm">
-                                                <span className="text-gray-500 text-sm font-black tracking-[0.5em] uppercase">No Data Stream</span>
-                                            </div>
-                                        ) : null}
-                                        {(loading && chartData.length === 0) ? (
-                                            <div className="absolute inset-0 flex flex-col justify-center items-center z-20 bg-black/80 backdrop-blur-sm">
-                                                <span className="text-blue-500 text-sm font-black animate-pulse tracking-[0.5em] uppercase">Connecting...</span>
-                                            </div>
-                                        ) : null}
+                                    {/* 載入中遮罩，保護圖表不被銷毀 */}
+                                    {loading && (
+                                        <div className="absolute inset-0 z-50 flex flex-col justify-center items-center bg-black/70 backdrop-blur-md rounded-xl mt-14">
+                                            <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                                            <span className="mt-4 text-blue-400 font-mono text-xs tracking-[0.2em] animate-pulse">SYNCING DATA STREAM...</span>
+                                        </div>
+                                    )}
 
-                                        {/* K 線圖與浮動標籤 (佔 4 份) */}
+                                    <div className="flex-1 bg-black/30 flex flex-col h-0 overflow-hidden p-1">
                                         <div className="relative w-full flex-[4] min-h-0 flex flex-col mb-1 rounded overflow-hidden">
                                             <div className="absolute top-2 left-2 z-10 flex flex-wrap gap-2 text-[10px] font-mono pointer-events-none">
                                                 <div className="bg-black/80 px-2 py-0.5 rounded text-gray-300 font-bold border border-white/5">K線</div>
@@ -984,7 +989,6 @@
                                             <div ref={containerRefs.kline} className="flex-1 w-full h-full pt-6" />
                                         </div>
                                         
-                                        {/* 成交量容器 (佔 1.2 份) */}
                                         <div className="relative w-full flex-[1.2] min-h-0 flex flex-col border-t border-white/5 bg-black/20 mb-1 rounded overflow-hidden">
                                             <div className="absolute top-1 left-2 z-10 flex gap-2 text-[10px] font-mono pointer-events-none">
                                                 <div className="bg-black/80 px-2 py-0.5 rounded text-gray-300 font-bold border border-white/5">成交量</div>
@@ -995,7 +999,6 @@
                                             <div ref={containerRefs.vol} className="flex-1 w-full h-full pt-4" />
                                         </div>
                                         
-                                        {/* MACD (佔 1.2 份) */}
                                         <div className="relative w-full flex-[1.2] min-h-0 flex flex-col border-t border-white/5 bg-black/20 mb-1 rounded overflow-hidden">
                                             <div className="absolute top-1 left-2 z-10 flex gap-2 text-[10px] font-mono pointer-events-none">
                                                 <div className="bg-black/80 px-2 py-0.5 rounded text-gray-300 font-bold border border-white/5">MACD (12,26,9)</div>
@@ -1006,7 +1009,6 @@
                                             <div ref={containerRefs.macd} className="flex-1 w-full h-full pt-4" />
                                         </div>
                                         
-                                        {/* KDJ (佔 1.2 份) */}
                                         <div className="relative w-full flex-[1.2] min-h-0 flex flex-col border-t border-white/5 bg-black/20 rounded-b-xl overflow-hidden pb-1">
                                             <div className="absolute top-1 left-2 z-10 flex gap-2 text-[10px] font-mono pointer-events-none">
                                                 <div className="bg-black/80 px-2 py-0.5 rounded text-gray-300 font-bold border border-white/5">KDJ (9,3,3)</div>
