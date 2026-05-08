@@ -14,6 +14,7 @@
         body { background-color: #030303; margin: 0; padding: 0; color: #d1d5db; overflow: hidden; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
         #root { height: 100%; width: 100%; }
         
+        /* 訂製流暢滾動條 */
         .custom-scrollbar::-webkit-scrollbar { width: 5px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: #000; border-radius: 2px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
@@ -21,6 +22,7 @@
         * { scrollbar-width: thin; scrollbar-color: #333 #000; }
         :-webkit-full-screen { background-color: #030303; }
         
+        /* 進階動畫定義 */
         @keyframes fadeInUp { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes glowPulse { 0%, 100% { box-shadow: 0 0 10px rgba(37, 99, 235, 0.1); border-color: rgba(37, 99, 235, 0.2); } 50% { box-shadow: 0 0 25px rgba(37, 99, 235, 0.3); border-color: rgba(37, 99, 235, 0.5); } }
@@ -154,11 +156,11 @@
             const safeUrl = url.includes('?') ? `${url}&${cb}` : `${url}?${cb}`;
             const encodedUrl = encodeURIComponent(safeUrl);
             
-            // 3 個節點同時競速，最快回傳的直接採用！
+            // 3 個節點同時競速，最快回傳的直接採用，解決單一節點超時卡死的問題！
             const proxies = [
+                `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`,
                 `https://corsproxy.io/?${encodedUrl}`,
-                `https://api.allorigins.win/raw?url=${encodedUrl}`,
-                `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`
+                `https://api.allorigins.win/raw?url=${encodedUrl}`
             ];
 
             try {
@@ -166,11 +168,10 @@
                     const res = await fetchWithTimeout(proxyUrl, { cache: 'no-store' }, timeoutMs);
                     if (!res.ok) throw new Error('Bad Proxy');
                     const text = await res.text();
-                    return JSON.parse(text);
+                    return JSON.parse(text); // 確保能正確解析 JSON
                 }));
                 return result;
             } catch (e) {
-                console.warn("All proxies failed for URL:", url);
                 return null;
             }
         };
@@ -487,13 +488,6 @@
                         instances.forEach(other => { if (other !== c) other.timeScale().setVisibleLogicalRange(range); });
                         isSyncing.current = false;
                     });
-                    
-                    c.subscribeCrosshairMove(param => {
-                        if (param.time) {
-                            // Find the specific data point from the series
-                            // Since we don't have direct access to enriched array here without refs, we use state.
-                        }
-                    });
                 });
                 isChartInitialized.current = true;
             }, []);
@@ -513,6 +507,7 @@
                     }
                 }
 
+                // 將即時資料縫合進歷史
                 if (liveTickData) {
                     const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
                     const lastCandle = uniqueHistory[uniqueHistory.length - 1];
@@ -555,7 +550,7 @@
                         ...item, ma5: ma5[i], ma20: ma20[i], ma60: ma60[i], dif: dif[i], dea: dea[i], macd: macd[i], k: k[i], d: d[i], j: j[i]
                     }));
                     
-                    // Crosshair tracking callback (Bind to the new enriched data)
+                    // 重新綁定浮動游標的資料
                     const kChart = chartRefs.current.kChart;
                     if (kChart) {
                         kChart.subscribeCrosshairMove(param => {
@@ -568,7 +563,7 @@
                         });
                     }
                     
-                    // Set default hover to latest
+                    // 預設顯示最新一筆
                     setHoverData(enriched[enriched.length - 1]);
 
                     try {
@@ -589,7 +584,7 @@
 
 
             // ==========================================
-            // 第一階段：極速加載即時報價與圖表 (互不阻塞)
+            // 獨立解耦階段 1：極速加載即時報價與圖表 (互不阻塞)
             // ==========================================
             useEffect(() => {
                 let isCurrent = true;
@@ -608,7 +603,7 @@
                     const matched = fullStockList.find(s => s.stock_id === stockId);
                     setCurrentName(matched ? matched.stock_name : stockId);
 
-                    // A. 發送即時報價抓取
+                    // A. 非同步發送即時報價抓取
                     fetchRealTimeAndFundamentals(stockId).then(live => {
                         if (!isCurrent || fetchId !== currentFetchId.current) return;
                         if (live) {
@@ -627,17 +622,24 @@
                             });
                             setLiveTickData(live);
                         } else {
-                            setLiveQuote(prev => ({ ...prev, price: '查無報價' }));
+                            // 失敗保護
+                            setLiveQuote(prev => ({ ...prev, price: '連線失敗' }));
+                        }
+                    }).catch(() => {
+                        if (isCurrent && fetchId === currentFetchId.current) {
+                            setLiveQuote(prev => ({ ...prev, price: '連線失敗' }));
                         }
                     });
 
-                    // B. 發送歷史資料抓取
+                    // B. 非同步發送歷史資料抓取
                     fetchHistoryData(stockId).then(history => {
                         if (!isCurrent || fetchId !== currentFetchId.current) return;
                         if (history && history.length > 0) {
                             setBaseHistoryData(history);
                         }
-                        setIsChartLoading(false); // 歷史圖表加載完畢即可解除遮罩
+                        setIsChartLoading(false); // 圖表加載完畢解除遮罩
+                    }).catch(() => {
+                        if (isCurrent && fetchId === currentFetchId.current) setIsChartLoading(false);
                     });
                 };
 
@@ -647,7 +649,7 @@
 
 
             // ==========================================
-            // 第二階段：背景執行 Groq AI 分析
+            // 獨立解耦階段 2：背景執行 Groq AI 分析
             // ==========================================
             useEffect(() => {
                 let isCurrent = true;
@@ -767,13 +769,14 @@
                 setAiModel(cleanModel);
                 setShowSettings(false); 
                 
+                // 強制觸發重讀
                 const temp = stockId;
                 setStockId("");
                 setTimeout(() => setStockId(temp), 10);
             };
 
             const isUp = liveQuote.change && !String(liveQuote.change).includes('-');
-            const priceColor = liveQuote.price === null || String(liveQuote.price) === '讀取中' || String(liveQuote.price) === '查無報價' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
+            const priceColor = liveQuote.price === null || String(liveQuote.price) === '讀取中' || String(liveQuote.price) === '查無報價' || String(liveQuote.price) === '連線失敗' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
             const zenClass = zenMode ? "fixed inset-0 z-[9999] bg-[#030303] p-1 lg:p-3" : "";
             const disableInput = isChartLoading; 
             
