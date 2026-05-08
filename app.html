@@ -28,8 +28,8 @@
         @keyframes glowPulse { 0%, 100% { box-shadow: 0 0 10px rgba(37, 99, 235, 0.1); border-color: rgba(37, 99, 235, 0.2); } 50% { box-shadow: 0 0 25px rgba(37, 99, 235, 0.3); border-color: rgba(37, 99, 235, 0.5); } }
         @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
-        .animate-fade-up { opacity: 0; animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
+        .animate-fade-up { opacity: 0; animation: fadeInUp 0.5s ease-out forwards; }
+        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
         .delay-50 { animation-delay: 50ms; }
         .delay-100 { animation-delay: 100ms; }
         .delay-150 { animation-delay: 150ms; }
@@ -178,7 +178,7 @@
                         high: Number(high).toFixed(2),
                         low: Number(low).toFixed(2),
                         close: currentPrice,
-                        volume: Math.round(volume / 1000) // 張數
+                        volume: Math.round(volume / 1000)
                     };
                 } catch (e) {}
             }
@@ -242,7 +242,6 @@
         });
 
         const App = () => {
-            // --- 解耦狀態管理 ---
             const [stockId, setStockId] = useState('2330');
             const [currentName, setCurrentName] = useState('台積電');
             const [inputValue, setInputValue] = useState('');
@@ -250,10 +249,8 @@
             const [customKey, setCustomKey] = useState(() => (localStorage.getItem('groq_api_key') || '').trim());
             const [aiModel, setAiModel] = useState(() => (localStorage.getItem('groq_model_name') || 'llama-3.3-70b-versatile').trim());
             
-            // 獨立即時報價狀態 (秒速顯示，擺脫延遲)
             const [liveQuote, setLiveQuote] = useState({ price: '讀取中', change: '---', percent: '---' });
             
-            // 追蹤清單狀態
             const [watchlist, setWatchlist] = useState(() => {
                 try {
                     return JSON.parse(localStorage.getItem('quant_watchlist')) || [
@@ -283,7 +280,6 @@
             const [isFullScreen, setIsFullScreen] = useState(false);
             const [zenMode, setZenMode] = useState(false);
             const [showSettings, setShowSettings] = useState(false);
-            const [animationKey, setAnimationKey] = useState(0);
 
             const rootRef = useRef(null);
             const inputRef = useRef(null); 
@@ -308,7 +304,7 @@
                 });
             };
 
-            // 安全序列化抓取追蹤清單即時報價 (保證清單順暢更新)
+            // 安全序列化抓取追蹤清單即時報價
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -387,7 +383,6 @@
                 setChartData([]); 
                 setAiData(null);
                 setStockId(targetId);
-                setAnimationKey(prev => prev + 1); 
             }, [stockId, fullStockList]);
 
             const handleSearch = useCallback(async () => {
@@ -624,7 +619,7 @@
                     setStockDetails({ open: rtData.open, high: rtData.high, low: rtData.low, volume: rtData.volume });
                     setChartData([{ time: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date()), open: Number(rtData.open), high: Number(rtData.high), low: Number(rtData.low), close: Number(rtData.close), volume: Number(rtData.volume) }]);
                 } else {
-                    setError(`無法取得標的 [${target}] 的任何報價。`);
+                    setError(`無法取得標的 [${target}] 的圖表資料。`);
                 }
 
                 setIsChartLoading(false);
@@ -749,8 +744,9 @@
             return (
                 <div className={`min-h-screen bg-[#030303] text-gray-200 font-sans p-1.5 lg:p-3 overflow-hidden flex flex-col ${zenClass}`} ref={rootRef}>
                     
-                    <div key={animationKey} className="flex-1 flex flex-col overflow-hidden w-full h-full animate-fade-in">
+                    <div className="flex-1 flex flex-col overflow-hidden w-full h-full animate-fade-in">
                         
+                        {/* 頂部標頭列 - 直接綁定 liveQuote 保證精準 */}
                         <header className="flex-none flex flex-col md:flex-row justify-between items-center mb-2 lg:mb-3 bg-[#0a0a0a] p-3 lg:p-4 border border-white/5 rounded-xl shadow-[0_4px_20px_rgba(0,0,0,0.5)] relative header-glow">
                             <div className="flex flex-col lg:flex-row lg:items-center gap-4 w-full lg:w-auto">
                                 <div className="flex items-center gap-4">
