@@ -107,104 +107,102 @@
             return weekly;
         };
 
-        // --- 強固型 Yahoo 歷史報價引擎 (修復圖表空白) ---
-        const fetchHistoryYahoo = async (target) => {
-            const timestamp = Date.now();
-            const proxies = [
-                `https://api.allorigins.win/raw?url=`,
-                `https://corsproxy.io/?`
-            ];
-            
-            for (let ext of ['.TW', '.TWO']) {
-                const url = encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1y&_t=${timestamp}`);
-                for (let proxy of proxies) {
-                    try {
-                        const res = await fetch(`${proxy}${url}`, { cache: 'no-store' });
-                        if (!res.ok) continue;
-                        const data = await res.json();
-                        if (data.chart?.error) continue;
-                        
-                        const result = data.chart.result[0];
-                        const timestamps = result.timestamp;
-                        const quote = result.indicators.quote[0];
-                        if (!timestamps || !quote) continue;
-                        
-                        const history = [];
-                        const seenDates = new Set();
-                        
-                        for (let i = 0; i < timestamps.length; i++) {
-                            if (quote.close[i] === null || quote.open[i] === null) continue;
-                            const d = new Date(timestamps[i] * 1000);
-                            const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        // --- 全新雙引擎架構：FinMind 為主，Yahoo 為輔 ---
+        const fetchHistoryData = async (target) => {
+            let history = [];
+            try {
+                // 1. 優先嘗試 FinMind (最穩定，但只到昨天)
+                const d = new Date(); d.setFullYear(d.getFullYear() - 1);
+                const res = await fetch(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`);
+                const json = await res.json();
+                if (json.msg === 'success' && json.data && json.data.length > 0) {
+                    history = json.data.map(i => ({ 
+                        time: i.date, open: Number(i.open), high: Number(i.max), low: Number(i.min), close: Number(i.close), volume: Number(i.Trading_Volume) 
+                    }));
+                    return history;
+                }
+            } catch (e) { console.warn("FinMind API Failed", e); }
+
+            // 2. 若 FinMind 失敗，嘗試 Yahoo 歷史資料代理
+            if (history.length === 0) {
+                const timestamp = Date.now();
+                const proxies = [`https://api.allorigins.win/get?url=`, `https://corsproxy.io/?`];
+                for (let ext of ['.TW', '.TWO']) {
+                    const url = encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1y&_t=${timestamp}`);
+                    for (let proxy of proxies) {
+                        try {
+                            const res = await fetch(`${proxy}${url}`, { cache: 'no-store' });
+                            if (!res.ok) continue;
+                            let data = await res.json();
+                            if (proxy.includes('allorigins')) {
+                                if (!data.contents) continue;
+                                data = JSON.parse(data.contents);
+                            }
+                            if (data.chart?.error) continue;
                             
-                            if (seenDates.has(dateStr)) continue;
-                            seenDates.add(dateStr);
+                            const result = data.chart.result[0];
+                            const timestamps = result.timestamp;
+                            const quote = result.indicators.quote[0];
+                            if (!timestamps || !quote) continue;
                             
-                            history.push({
-                                time: dateStr,
-                                open: Number(quote.open[i]),
-                                high: Number(quote.high[i]),
-                                low: Number(quote.low[i]),
-                                close: Number(quote.close[i]),
-                                volume: Number(quote.volume[i])
-                            });
-                        }
-                        if (history.length > 0) return history;
-                    } catch(e) { console.warn("History Proxy Failed", e); }
+                            const seenDates = new Set();
+                            for (let i = 0; i < timestamps.length; i++) {
+                                if (quote.close[i] === null || quote.open[i] === null) continue;
+                                const d = new Date(timestamps[i] * 1000);
+                                const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                                if (seenDates.has(dateStr)) continue;
+                                seenDates.add(dateStr);
+                                history.push({
+                                    time: dateStr, open: Number(quote.open[i]), high: Number(quote.high[i]), low: Number(quote.low[i]), close: Number(quote.close[i]), volume: Number(quote.volume[i])
+                                });
+                            }
+                            if (history.length > 0) return history;
+                        } catch(e) {}
+                    }
                 }
             }
-            return [];
+            return history;
         };
 
         // --- 強固型 Yahoo 即時報價引擎 ---
         const fetchRealTimeYahoo = async (target) => {
             const timestamp = Date.now();
-            const urlTW = encodeURIComponent(`https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}.TW&_t=${timestamp}`);
-            const urlTWO = encodeURIComponent(`https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}.TWO&_t=${timestamp}`);
-
-            const urlsToTry = [urlTW, urlTWO];
-            const proxies = [
-                `https://api.allorigins.win/raw?url=`,
-                `https://corsproxy.io/?`
-            ];
-
-            for (const safeUrl of urlsToTry) {
+            const proxies = [`https://api.allorigins.win/get?url=`, `https://corsproxy.io/?`];
+            
+            for (let ext of ['.TW', '.TWO']) {
+                const url = encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1d&_t=${timestamp}`);
                 for (const proxy of proxies) {
                     try {
-                        const res = await fetch(`${proxy}${safeUrl}`, { cache: 'no-store' });
+                        const res = await fetch(`${proxy}${url}`, { cache: 'no-store' });
                         if (!res.ok) continue;
+                        let data = await res.json();
+                        if (proxy.includes('allorigins')) {
+                            if (!data.contents) continue;
+                            data = JSON.parse(data.contents);
+                        }
+                        if (data.chart?.error) continue;
 
-                        const parsed = await res.json();
-                        const result = parsed.quoteResponse?.result?.[0];
-                        if (!result || !result.regularMarketPrice) continue; 
+                        const result = data.chart.result[0];
+                        const meta = result.meta;
+                        const quote = result.indicators?.quote?.[0];
                         
-                        const close = result.regularMarketPrice;
-                        const prevClose = result.regularMarketPreviousClose || close; 
+                        const close = meta.regularMarketPrice;
+                        const prevClose = meta.chartPreviousClose || close; 
                         const change = close - prevClose;
                         const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
                         
-                        const open = result.regularMarketOpen || close;
-                        const high = result.regularMarketDayHigh || close;
-                        const low = result.regularMarketDayLow || close;
-                        const volume = result.regularMarketVolume || 0;
-                        
-                        let marketCapStr = "---";
-                        if (result.marketCap) {
-                            if (result.marketCap >= 1000000000000) {
-                                marketCapStr = (result.marketCap / 1000000000000).toFixed(2) + " 兆";
-                            } else {
-                                marketCapStr = (result.marketCap / 100000000).toFixed(2) + " 億";
-                            }
-                        }
+                        const open = quote?.open?.[0] || close;
+                        const high = quote?.high?.[0] || close;
+                        const low = quote?.low?.[0] || close;
+                        const volume = quote?.volume?.[0] || 0;
                         
                         return {
                             price: close.toFixed(2),
                             change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
                             percent: (change > 0 ? '+' : '') + percent.toFixed(2) + '%',
-                            open: open, high: high, low: low, close: close, volume: volume,
-                            marketCap: marketCapStr
+                            open: open, high: high, low: low, close: close, volume: volume
                         };
-                    } catch (e) { }
+                    } catch (e) {}
                 }
             }
             return null; 
@@ -224,27 +222,13 @@
             }
         };
 
-        const getMockData = (symbol, price) => ({
-            name: `${symbol} (安全模式)`, price: String(price), change: "---", percent: "---", industry: "離線防護",
-            market: { taiex: "等候連線", sox: "等候連線", nasdaq: "等候連線" },
-            peers: [{ name: "防護系統A", change: "---" }, { name: "防護系統B", change: "---" }],
-            valuation: { yield: "---", pb: "---", rating: "連線異常", marketCap: "---" },
-            growth: { mom: "---", yoy: "---", forwardPE: "---", grossMargin: "---" },
-            risk: { level: "未知", details: "網路或金鑰狀態異常，啟動安全防護模式。圖表與頂部為真實報價，文字分析暫停。" },
-            fund: { eps: "---", gross: "---", net: "---", status: "等待網路或金鑰狀態恢復..." },
-            chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "等待狀態恢復..." },
-            moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "無資料。" },
-            tech: { ma: "---", support: "---", pressure: "---" },
-            strategy: { score: 0, conclusion: "安全模式運行中", short: "---", swing: "---", stop: "---" },
-            news: []
-        });
-
         const App = () => {
             const [stockId, setStockId] = useState('2330');
             const [inputValue, setInputValue] = useState('');
             const [customKey, setCustomKey] = useState(() => (localStorage.getItem('groq_api_key') || '').trim());
             const [aiModel, setAiModel] = useState(() => (localStorage.getItem('groq_model_name') || 'llama-3.3-70b-versatile').trim());
             
+            // 直式追蹤清單狀態管理
             const [watchlist, setWatchlist] = useState(() => {
                 try {
                     return JSON.parse(localStorage.getItem('quant_watchlist')) || [
@@ -274,8 +258,6 @@
             const [isFullScreen, setIsFullScreen] = useState(false);
             const [zenMode, setZenMode] = useState(false);
             const [showSettings, setShowSettings] = useState(false);
-            
-            // 將動畫觸發移到內層，確保最外層 ref 不被銷毀
             const [animationKey, setAnimationKey] = useState(0);
 
             const rootRef = useRef(null);
@@ -306,7 +288,7 @@
                 });
             };
 
-            // 安全序列化抓取追蹤清單報價 (修復清單顯示---)
+            // 安全序列化抓取追蹤清單報價
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -326,7 +308,7 @@
                                 setWatchlistQuotes({ ...newQuotes }); 
                             }
                         } catch(e){}
-                        await new Promise(r => setTimeout(r, 200)); // 避免被短時間內阻擋
+                        await new Promise(r => setTimeout(r, 200)); 
                     }
                 };
                 
@@ -379,15 +361,15 @@
             };
 
             const executeJump = useCallback((targetId) => {
-                if (aiLoading || isFetchingRef.current || targetId === stockId) return;
+                if (isFetchingRef.current || targetId === stockId) return;
                 setShowSuggestions(false);
                 setAnimationKey(prev => prev + 1); 
                 setStockId(targetId);
-            }, [aiLoading, stockId]);
+            }, [stockId]);
 
             const handleSearch = useCallback(async () => {
                 let input = inputValue.trim();
-                if (!input || aiLoading || isFetchingRef.current) return;
+                if (!input || isFetchingRef.current) return;
                 setShowSuggestions(false);
 
                 if (/[\u4e00-\u9fa5]/.test(input) && fullStockList.length > 0) {
@@ -402,15 +384,11 @@
                     }
                 }
                 executeJump(input.toUpperCase());
-            }, [inputValue, aiLoading, fullStockList, executeJump]);
+            }, [inputValue, fullStockList, executeJump]);
 
             const toggleFullScreen = useCallback(() => {
                 if (!document.fullscreenElement) {
-                    if (rootRef.current) {
-                        rootRef.current.requestFullscreen().catch((err) => {
-                            console.error("全螢幕失敗:", err);
-                        });
-                    }
+                    if (rootRef.current) rootRef.current.requestFullscreen().catch(() => {});
                 } else {
                     document.exitFullscreen();
                 }
@@ -422,7 +400,7 @@
                 return () => document.removeEventListener('fullscreenchange', fn);
             }, []);
 
-            // --- 圖表初始化 (完美彈性高度不溢出) ---
+            // --- 彈性自適應圖表 (Flex H-0 絕對填滿不溢出) ---
             const initCharts = useCallback(() => {
                 if (!window.LightweightCharts || isChartInitialized.current || !containerRefs.kline.current) return;
                 
@@ -455,7 +433,6 @@
                 chartRefs.current = { kChart, vChart, mChart, kjChart };
                 seriesRefs.current = { kSeries, ma5Series, ma20Series, ma60Series, vSeries, macdDifSeries: mDif, macdDeaSeries: mDea, macdHistSeries: mHist, kdjKSeries: kjK, kdjDSeries: kjD, kdjJSeries: kjJ };
 
-                // 使用 requestAnimationFrame 修復 ResizeObserver Loop
                 const resizeObserver = new ResizeObserver(entries => {
                     window.requestAnimationFrame(() => {
                         if (!isChartInitialized.current) return;
@@ -567,8 +544,8 @@
                         if (stock) officialName = stock.stock_name;
                     }
 
-                    // 強制改用 Yahoo 歷史報價代理確保圖表一定出得來
-                    let historyCache = await fetchHistoryYahoo(target);
+                    // 強固抓取歷史與即時數據，確保畫面一定有東西
+                    let historyCache = await fetchHistoryData(target);
                     try { rtData = await fetchRealTimeYahoo(target); } catch(e) {}
 
                     if (historyCache && historyCache.length > 0) {
@@ -599,11 +576,18 @@
                             open: Number(rtData.open).toFixed(2), high: Number(rtData.high).toFixed(2), low: Number(rtData.low).toFixed(2), volume: Math.round(rtData.volume / 1000)
                         };
                         setStockDetails(currentDataState);
+                    } else {
+                        // 都抓不到資料的極端情況
+                        setError(`標的 [${target}] 無法取得任何報價資料，請確認代號是否正確。`);
                     }
 
                     const cleanKey = customKey ? customKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '') : "";
                     if (!cleanKey) {
-                        if(!isRefresh) setAiData(getMockData(officialName, lastClosePrice));
+                        if(!isRefresh) {
+                            const fallback = getMockData(officialName, lastClosePrice);
+                            fallback.change = rtData?.change || "---"; fallback.percent = rtData?.percent || "---";
+                            setAiData(fallback);
+                        }
                         setAiLoading(false); setLoading(false); isFetchingRef.current = false; return; 
                     }
 
@@ -618,7 +602,6 @@
                                 const cachedData = parsedCache.data;
                                 if (rtData) {
                                     cachedData.price = rtData.price; cachedData.change = rtData.change; cachedData.percent = rtData.percent;
-                                    if(rtData.marketCap && rtData.marketCap !== "---") cachedData.valuation.marketCap = rtData.marketCap;
                                 }
                                 setAiData(cachedData);
                                 setAiLoading(false); setLoading(false); isFetchingRef.current = false; return; 
@@ -628,11 +611,7 @@
 
                     if (isRefresh) {
                         if (aiData && rtData) {
-                            setAiData(prev => {
-                                const newD = {...prev, price: rtData.price, change: rtData.change, percent: rtData.percent};
-                                if(rtData.marketCap && rtData.marketCap !== "---") newD.valuation.marketCap = rtData.marketCap;
-                                return newD;
-                            });
+                            setAiData(prev => ({...prev, price: rtData.price, change: rtData.change, percent: rtData.percent}));
                         }
                         setAiLoading(false); setLoading(false); isFetchingRef.current = false; return;
                     }
@@ -679,12 +658,12 @@
                         price: rtData ? rtData.price : String(rawP.price || lastClosePrice),
                         change: rtData ? rtData.change : String(rawP.change || "0"),
                         percent: rtData ? rtData.percent : String(rawP.percent || "0%"),
-                        industry: String(rawP.industry || "-"),
+                        industry: String(rawP.industry || "未分類"),
                         market: { taiex: String(rawP.market?.taiex || "穩定"), sox: String(rawP.market?.sox || "穩定"), nasdaq: String(rawP.market?.nasdaq || "穩定") },
                         peers: Array.isArray(rawP.peers) ? rawP.peers.map(p => ({ name: String(p?.name || "-"), change: String(p?.change || "0") })) : [],
                         valuation: {
                             yield: String(rawP.valuation?.yield || "估算中"), pb: String(rawP.valuation?.pb || "估算中"), rating: String(rawP.valuation?.rating || "中立"), 
-                            marketCap: rtData && rtData.marketCap !== "---" ? rtData.marketCap : String(rawP.valuation?.marketCap || "估算中")
+                            marketCap: String(rawP.valuation?.marketCap || "估算中")
                         },
                         growth: { mom: String(rawP.growth?.mom || "持平"), yoy: String(rawP.growth?.yoy || "持平"), forwardPE: String(rawP.growth?.forwardPE || "估算中"), grossMargin: String(rawP.growth?.grossMargin || "持平") },
                         risk: { level: String(rawP.risk?.level || "中"), details: String(rawP.risk?.details || "目前無重大風險事件") },
@@ -700,12 +679,12 @@
                     localStorage.setItem(cacheKey, JSON.stringify({ timestamp: nowMs, data: safeAiData }));
 
                 } catch (e) { 
-                    // 防護機制：AI 失敗時強迫保留報價
+                    // 防護機制：AI 失敗時強迫保留報價，絕不出現全畫面 ---
                     const fallbackData = {
                         name: officialName, price: rtData?.price || lastClosePrice, change: rtData?.change || "---", percent: rtData?.percent || "---", industry: "---",
                         market: { taiex: "連線異常", sox: "連線異常", nasdaq: "連線異常" }, peers: [],
-                        valuation: { yield: "---", pb: "---", rating: "---", marketCap: rtData?.marketCap || "---" },
-                        growth: { mom: "---", yoy: "---", forwardPE: "---", grossMargin: "---" },
+                        valuation: { yield: "估算中", pb: "估算中", rating: "---", marketCap: "估算中" },
+                        growth: { mom: "估算中", yoy: "估算中", forwardPE: "估算中", grossMargin: "估算中" },
                         risk: { level: "---", details: "AI 分析失敗或連線逾時，圖表與頂部為真實報價，請檢查金鑰或稍後再試。" },
                         fund: { eps: "---", gross: "---", net: "---", status: "分析連線逾時" }, chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "分析連線逾時" },
                         moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "分析連線逾時" }, tech: { ma: "---", support: "---", pressure: "---" },
@@ -848,7 +827,7 @@
                             {/* 左側：自選、聯動、同業、估值、成長 */}
                             <div className="col-span-12 lg:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-1 pb-1">
                                 
-                                {/* 直式自選追蹤清單面板 */}
+                                {/* 直式自選追蹤清單面板 (可隱藏/展開動畫) */}
                                 <div className="panel-card flex-none animate-fade-up transition-all duration-500 overflow-hidden border-yellow-900/30">
                                     <div className="bg-yellow-950/20 border-b border-white/5 p-3 px-4 flex justify-between items-center cursor-pointer hover:bg-yellow-900/30 transition-colors" onClick={() => setIsWatchlistExpanded(!isWatchlistExpanded)}>
                                         <span className="text-yellow-400 font-bold text-xs tracking-widest uppercase">自選追蹤清單</span>
