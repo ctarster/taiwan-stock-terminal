@@ -28,10 +28,6 @@
 
         .animate-fade-up { opacity: 0; animation: fadeInUp 0.4s ease-out forwards; }
         .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
-        .delay-50 { animation-delay: 50ms; }
-        .delay-100 { animation-delay: 100ms; }
-        .delay-150 { animation-delay: 150ms; }
-        .delay-200 { animation-delay: 200ms; }
         .header-glow { animation: glowPulse 3s infinite ease-in-out; }
         
         .loading-shimmer { background: linear-gradient(90deg, rgba(255,255,255,0.02) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.02) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite linear; }
@@ -43,9 +39,33 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useCallback, useRef } = React;
+        const { useState, useEffect, useCallback, useRef, useMemo } = React;
 
         const defaultModel = "llama-3.3-70b-versatile";
+
+        // --- 全局數值格式化工具 (徹底消滅無限小數點) ---
+        const fmtPrice = (val) => {
+            if (val === undefined || val === null || val === '-' || val === '---') return '---';
+            const num = Number(val);
+            return isNaN(num) ? '---' : num.toFixed(2);
+        };
+        const formatChange = (val) => {
+            if (val === undefined || val === null || val === '-' || val === '---') return '---';
+            const num = Number(val);
+            if (isNaN(num)) return '---';
+            return num > 0 ? `+${num.toFixed(2)}` : num.toFixed(2);
+        };
+        const formatPercent = (val) => {
+            if (val === undefined || val === null || val === '-' || val === '---') return '---';
+            const num = Number(val);
+            if (isNaN(num)) return '---';
+            return num > 0 ? `+${num.toFixed(2)}%` : `${num.toFixed(2)}%`;
+        };
+        const fmtVol = (val) => {
+            if (val === undefined || val === null || val === '-' || val === '---') return '0';
+            const num = Number(val);
+            return isNaN(num) ? '0' : Math.round(num).toString();
+        };
 
         // --- 技術指標核心運算 ---
         const Indicators = {
@@ -115,7 +135,7 @@
             return weekly;
         };
 
-        const fetchWithTimeout = async (url, options = {}, timeoutMs = 12000) => {
+        const fetchWithTimeout = async (url, options = {}, timeoutMs = 8000) => {
             const controller = new AbortController();
             const id = setTimeout(() => controller.abort(), timeoutMs);
             try {
@@ -124,131 +144,105 @@
                 return response;
             } catch (e) {
                 clearTimeout(id);
-                throw new Error("連線逾時");
+                throw new Error("Timeout");
             }
         };
 
-        // --- 強固型快取擊穿網路引擎 ---
-        const fetchWithProxy = async (url, timeoutMs = 8000) => {
-            const cb = `_cb=${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+        // --- 獨創：多線程競速代理引擎 (Promise.any 極速抓取) ---
+        const fetchFastestProxy = async (url, timeoutMs = 6000) => {
+            const cb = `_cb=${Date.now()}_${Math.floor(Math.random() * 100000)}`;
             const safeUrl = url.includes('?') ? `${url}&${cb}` : `${url}?${cb}`;
             const encodedUrl = encodeURIComponent(safeUrl);
             
+            // 3 個節點同時競速，最快回傳的直接採用！
             const proxies = [
-                { url: `https://corsproxy.io/?${encodedUrl}`, type: 'direct' },
-                { url: `https://api.allorigins.win/get?url=${encodedUrl}&disableCache=true`, type: 'wrapped' }
+                `https://corsproxy.io/?${encodedUrl}`,
+                `https://api.allorigins.win/raw?url=${encodedUrl}`,
+                `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`
             ];
 
-            for (const proxy of proxies) {
-                try {
-                    const res = await fetchWithTimeout(proxy.url, { cache: 'no-store' }, timeoutMs);
-                    if (!res.ok) continue;
-
-                    if (proxy.type === 'wrapped') {
-                        const data = await res.json();
-                        if (data.contents) return JSON.parse(data.contents);
-                    } else {
-                        return await res.json();
-                    }
-                } catch (e) { }
+            try {
+                const result = await Promise.any(proxies.map(async (proxyUrl) => {
+                    const res = await fetchWithTimeout(proxyUrl, { cache: 'no-store' }, timeoutMs);
+                    if (!res.ok) throw new Error('Bad Proxy');
+                    const text = await res.text();
+                    return JSON.parse(text);
+                }));
+                return result;
+            } catch (e) {
+                console.warn("All proxies failed for URL:", url);
+                return null;
             }
-            return null;
         };
 
-        // --- 1. 極速即時報價與基礎面數據引擎 (解決右邊資料全無的問題) ---
+        // --- 1. 極速即時報價引擎 (1分K解析) ---
         const fetchRealTimeAndFundamentals = async (target) => {
             for (let ext of ['.TW', '.TWO']) {
-                // 改用 v7 quote 獲取最完整的現價與基本面資料
                 const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}${ext}`;
-                try {
-                    const data = await fetchWithProxy(url, 6000);
-                    if (data && data.quoteResponse && data.quoteResponse.result) {
-                        const result = data.quoteResponse.result[0];
-                        if (!result || !result.regularMarketPrice) continue;
+                const data = await fetchFastestProxy(url, 5000);
+                if (data && data.quoteResponse && data.quoteResponse.result) {
+                    const result = data.quoteResponse.result[0];
+                    if (!result || !result.regularMarketPrice) continue;
 
-                        const currentPrice = result.regularMarketPrice;
-                        const prevClose = result.regularMarketPreviousClose || currentPrice;
-                        const change = currentPrice - prevClose;
-                        const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
-                        
-                        let marketCapStr = "---";
-                        if (result.marketCap) {
-                            marketCapStr = result.marketCap >= 1000000000000 
-                                ? (result.marketCap / 1000000000000).toFixed(2) + " 兆" 
-                                : (result.marketCap / 100000000).toFixed(2) + " 億";
-                        }
-
-                        const pe = result.trailingPE ? result.trailingPE.toFixed(2) : "---";
-                        const pb = result.priceToBook ? result.priceToBook.toFixed(2) : "---";
-                        const yieldVal = result.trailingAnnualDividendYield ? (result.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---";
-
-                        return {
-                            price: currentPrice.toFixed(2),
-                            change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
-                            percent: (change > 0 ? '+' : '') + percent.toFixed(2) + '%',
-                            open: result.regularMarketOpen ? Number(result.regularMarketOpen).toFixed(2) : currentPrice.toFixed(2),
-                            high: result.regularMarketDayHigh ? Number(result.regularMarketDayHigh).toFixed(2) : currentPrice.toFixed(2),
-                            low: result.regularMarketDayLow ? Number(result.regularMarketDayLow).toFixed(2) : currentPrice.toFixed(2),
-                            close: currentPrice,
-                            volume: result.regularMarketVolume ? Math.round(result.regularMarketVolume / 1000) : 0,
-                            marketCap: marketCapStr,
-                            pe: pe,
-                            pb: pb,
-                            yield: yieldVal
-                        };
+                    const currentPrice = result.regularMarketPrice;
+                    const prevClose = result.regularMarketPreviousClose || currentPrice;
+                    const change = currentPrice - prevClose;
+                    const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
+                    
+                    let marketCapStr = "---";
+                    if (result.marketCap) {
+                        marketCapStr = result.marketCap >= 1000000000000 
+                            ? (result.marketCap / 1000000000000).toFixed(2) + " 兆" 
+                            : (result.marketCap / 100000000).toFixed(2) + " 億";
                     }
-                } catch(e) {}
+
+                    return {
+                        price: currentPrice,
+                        change: change,
+                        percent: percent,
+                        open: result.regularMarketOpen || currentPrice,
+                        high: result.regularMarketDayHigh || currentPrice,
+                        low: result.regularMarketDayLow || currentPrice,
+                        close: currentPrice,
+                        volume: result.regularMarketVolume ? Math.round(result.regularMarketVolume / 1000) : 0,
+                        marketCap: marketCapStr,
+                        pe: result.trailingPE ? result.trailingPE.toFixed(2) : "---",
+                        pb: result.priceToBook ? result.priceToBook.toFixed(2) : "---",
+                        yield: result.trailingAnnualDividendYield ? (result.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---"
+                    };
+                }
             }
             return null;
         };
 
-        // --- 2. 歷史圖表引擎 (Yahoo 優先！解決 K 線少一天的問題) ---
+        // --- 2. 歷史圖表引擎 (Yahoo 極速版) ---
         const fetchHistoryData = async (target) => {
-            // 先嘗試 Yahoo (包含盤中最新數據)
             for (let ext of ['.TW', '.TWO']) {
                 const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1y`;
-                try {
-                    const data = await fetchWithProxy(url, 6000);
-                    if (data && data.chart && data.chart.result) {
-                        const result = data.chart.result[0];
-                        const timestamps = result.timestamp;
-                        const quote = result.indicators?.quote?.[0];
-                        if (!timestamps || !quote) continue;
-                        
-                        const history = [];
-                        const seenDates = new Set();
-                        for (let i = 0; i < timestamps.length; i++) {
-                            if (quote.close[i] === null || quote.open[i] === null) continue;
-                            const d = new Date(timestamps[i] * 1000);
-                            const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-                            if (seenDates.has(dateStr)) continue;
-                            seenDates.add(dateStr);
-                            history.push({
-                                time: dateStr, 
-                                open: Number(quote.open[i]), 
-                                high: Number(quote.high[i]), 
-                                low: Number(quote.low[i]), 
-                                close: Number(quote.close[i]), 
-                                volume: Number(quote.volume[i])
-                            });
-                        }
-                        if (history.length > 0) return history;
+                const data = await fetchFastestProxy(url, 6000);
+                if (data && data.chart && data.chart.result) {
+                    const result = data.chart.result[0];
+                    const timestamps = result.timestamp;
+                    const quote = result.indicators?.quote?.[0];
+                    if (!timestamps || !quote) continue;
+                    
+                    const history = [];
+                    for (let i = 0; i < timestamps.length; i++) {
+                        if (quote.close[i] === null || quote.open[i] === null) continue;
+                        const d = new Date(timestamps[i] * 1000);
+                        const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                        history.push({
+                            time: dateStr, 
+                            open: Number(quote.open[i]), 
+                            high: Number(quote.high[i]), 
+                            low: Number(quote.low[i]), 
+                            close: Number(quote.close[i]), 
+                            volume: Number(quote.volume[i])
+                        });
                     }
-                } catch(e) {}
-            }
-
-            // 備用：FinMind (會延遲一天)
-            try {
-                const d = new Date(); d.setFullYear(d.getFullYear() - 2);
-                const res = await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`, {}, 4000);
-                const json = await res.json();
-                if (json.msg === 'success' && json.data && json.data.length > 0) {
-                    return json.data.map(i => ({ 
-                        time: i.date, open: Number(i.open), high: Number(i.max), low: Number(i.min), close: Number(i.close), volume: Number(i.Trading_Volume) 
-                    }));
+                    if (history.length > 0) return history;
                 }
-            } catch (e) { }
-
+            }
             return [];
         };
 
@@ -256,10 +250,10 @@
             name: `${symbol}`, industry: "尚未分析",
             market: { taiex: "等待同步", sox: "等待同步", nasdaq: "等待同步" },
             peers: [],
-            valuation: { yield: "---", pb: "---", rating: "---", marketCap: "---" },
-            growth: { mom: "---", yoy: "---", forwardPE: "---", grossMargin: "---" },
-            risk: { level: "---", details: "請點擊右上角「設定」輸入您的 Groq API 金鑰，解鎖 AI 深度分析。左上角與圖表為真實即時報價。" },
-            fund: { eps: "---", gross: "---", net: "---", status: "等待設定金鑰..." },
+            valuation: { rating: "---" },
+            growth: { mom: "---", yoy: "---", grossMargin: "---" },
+            risk: { level: "---", details: "請點擊右上角「設定」輸入 Groq 金鑰解鎖深度分析。左上角與圖表為絕對真實即時報價。" },
+            fund: { status: "等待設定金鑰..." },
             chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "等待設定金鑰..." },
             moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "無資料。" },
             tech: { ma: "---", support: "---", pressure: "---" },
@@ -275,8 +269,10 @@
             const [customKey, setCustomKey] = useState(() => (localStorage.getItem('groq_api_key') || '').trim());
             const [aiModel, setAiModel] = useState(() => (localStorage.getItem('groq_model_name') || defaultModel).trim());
             
-            const [liveQuote, setLiveQuote] = useState({ price: '讀取中', change: '---', percent: '---', open: '---', high: '---', low: '---', volume: '0', marketCap: '---', pe: '---', pb: '---', yield: '---' });
-            const [chartData, setChartData] = useState([]); 
+            // 獨立狀態：確保資料結構永遠乾淨
+            const [liveQuote, setLiveQuote] = useState({ price: null, change: null, percent: null, open: null, high: null, low: null, volume: null, marketCap: '---', pe: '---', pb: '---', yield: '---' });
+            const [baseHistoryData, setBaseHistoryData] = useState([]); 
+            const [liveTickData, setLiveTickData] = useState(null); // 用於圖表合成
             const [aiData, setAiData] = useState(null);
             
             const [watchlist, setWatchlist] = useState(() => {
@@ -314,7 +310,6 @@
             
             const isChartInitialized = useRef(false);
             const isSyncing = useRef(false);
-            const enrichedDataRef = useRef([]);
             const currentFetchId = useRef(0);
 
             const isWatched = watchlist.some(w => w.id === stockId);
@@ -328,7 +323,7 @@
                 });
             };
 
-            // 追蹤清單安全刷新
+            // 自選清單背景安全刷新
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -494,85 +489,107 @@
                     });
                     
                     c.subscribeCrosshairMove(param => {
-                        if (param.time && enrichedDataRef.current.length > 0) {
-                            const dataPoint = enrichedDataRef.current.find(d => d.time === param.time);
-                            if (dataPoint) setHoverData(dataPoint);
-                        } else {
-                            if (enrichedDataRef.current.length > 0) {
-                                setHoverData(enrichedDataRef.current[enrichedDataRef.current.length - 1]);
-                            }
+                        if (param.time) {
+                            // Find the specific data point from the series
+                            // Since we don't have direct access to enriched array here without refs, we use state.
                         }
                     });
                 });
                 isChartInitialized.current = true;
             }, []);
 
-            const updateChartData = useCallback((historyArray) => {
-                if (!isChartInitialized.current) return;
-                const s = seriesRefs.current;
-                if (!s.kSeries) return;
-
-                if (!historyArray || historyArray.length === 0) {
-                    try {
-                        s.kSeries.setData([]); s.ma5Series.setData([]); s.ma20Series.setData([]); s.ma60Series.setData([]);
-                        s.vSeries.setData([]); s.macdDifSeries.setData([]); s.macdDeaSeries.setData([]); s.macdHistSeries.setData([]);
-                        s.kdjKSeries.setData([]); s.kdjDSeries.setData([]); s.kdjJSeries.setData([]);
-                    } catch(e) {}
-                    return;
-                }
-
-                // 時間去重，保證不崩潰
-                const sorted = [...historyArray].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+            // --- 即時合成 K 棒邏輯 ---
+            const chartDataToRender = useMemo(() => {
+                if (!baseHistoryData || baseHistoryData.length === 0) return [];
+                
+                // 去重
+                const sorted = [...baseHistoryData].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
                 const uniqueHistory = [];
                 const seen = new Set();
                 for (let item of sorted) {
-                    if (seen.has(item.time)) {
-                        uniqueHistory[uniqueHistory.length - 1] = item;
-                    } else {
+                    if (!seen.has(item.time)) {
                         seen.add(item.time);
-                        uniqueHistory.push(item);
+                        uniqueHistory.push({...item});
                     }
                 }
 
-                const closePrices = uniqueHistory.map(d => d.close);
-                const ma5 = Indicators.ema(closePrices, 5);
-                const ma20 = Indicators.ema(closePrices, 20);
-                const ma60 = Indicators.ema(closePrices, 60);
-                const { dif, dea, macd } = Indicators.calculateMACD(closePrices);
-                const { k, d, j } = Indicators.calculateKDJ(uniqueHistory);
-                
-                const enriched = uniqueHistory.map((item, i) => ({
-                    ...item, ma5: ma5[i], ma20: ma20[i], ma60: ma60[i], dif: dif[i], dea: dea[i], macd: macd[i], k: k[i], d: d[i], j: j[i]
-                }));
-                enrichedDataRef.current = enriched;
-                setHoverData(enriched[enriched.length - 1]); 
+                if (liveTickData) {
+                    const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
+                    const lastCandle = uniqueHistory[uniqueHistory.length - 1];
+                    const lOpen = Number(liveTickData.open);
+                    const lHigh = Number(liveTickData.high);
+                    const lLow = Number(liveTickData.low);
+                    const lClose = Number(liveTickData.close);
+                    const lVol = Number(liveTickData.volume);
 
-                try {
-                    s.kSeries.setData(uniqueHistory);
-                    s.ma5Series.setData(uniqueHistory.map((d, i) => ({ time: d.time, value: ma5[i] })));
-                    s.ma20Series.setData(uniqueHistory.map((d, i) => ({ time: d.time, value: ma20[i] })));
-                    s.ma60Series.setData(uniqueHistory.map((d, i) => ({ time: d.time, value: ma60[i] })));
-                    s.vSeries.setData(uniqueHistory.map(data => ({ time: data.time, value: data.volume, color: data.close >= data.open ? 'rgba(239, 68, 68, 0.6)' : 'rgba(34, 197, 94, 0.6)' })));
-                    s.macdDifSeries.setData(uniqueHistory.map((d, i) => ({ time: d.time, value: dif[i] || 0 })));
-                    s.macdDeaSeries.setData(uniqueHistory.map((d, i) => ({ time: d.time, value: dea[i] || 0 })));
-                    s.macdHistSeries.setData(uniqueHistory.map((d, i) => ({ time: d.time, value: macd[i] || 0, color: macd[i] >= 0 ? '#ef4444' : '#22c55e' })));
-                    s.kdjKSeries.setData(uniqueHistory.map((v, i) => ({ time: v.time, value: k[i] || 50 })));
-                    s.kdjDSeries.setData(uniqueHistory.map((v, i) => ({ time: v.time, value: d[i] || 50 })));
-                    s.kdjJSeries.setData(uniqueHistory.map((v, i) => ({ time: v.time, value: j[i] || 50 })));
-                } catch(e) {}
-            }, []);
+                    if (lastCandle.time < todayStr) {
+                        uniqueHistory.push({ time: todayStr, open: lOpen, high: lHigh, low: lLow, close: lClose, volume: lVol });
+                    } else if (lastCandle.time === todayStr) {
+                        lastCandle.open = lOpen;
+                        lastCandle.high = Math.max(lastCandle.high, lHigh);
+                        lastCandle.low = Math.min(lastCandle.low, lLow);
+                        lastCandle.close = lClose;
+                        lastCandle.volume = Math.max(lastCandle.volume, lVol);
+                    }
+                }
+                
+                if (timeframe === '1W') return aggregateWeekly(uniqueHistory);
+                return uniqueHistory;
+            }, [baseHistoryData, liveTickData, timeframe]);
 
             useEffect(() => {
-                if (chartData.length > 0) {
+                if (chartDataToRender.length > 0) {
                     if (!isChartInitialized.current) initCharts();
-                    const displayData = timeframe === '1W' ? aggregateWeekly(chartData) : chartData;
-                    updateChartData(displayData);
+                    
+                    const s = seriesRefs.current;
+                    if (!s.kSeries) return;
+
+                    const closePrices = chartDataToRender.map(d => d.close);
+                    const ma5 = Indicators.ema(closePrices, 5);
+                    const ma20 = Indicators.ema(closePrices, 20);
+                    const ma60 = Indicators.ema(closePrices, 60);
+                    const { dif, dea, macd } = Indicators.calculateMACD(closePrices);
+                    const { k, d, j } = Indicators.calculateKDJ(chartDataToRender);
+                    
+                    const enriched = chartDataToRender.map((item, i) => ({
+                        ...item, ma5: ma5[i], ma20: ma20[i], ma60: ma60[i], dif: dif[i], dea: dea[i], macd: macd[i], k: k[i], d: d[i], j: j[i]
+                    }));
+                    
+                    // Crosshair tracking callback (Bind to the new enriched data)
+                    const kChart = chartRefs.current.kChart;
+                    if (kChart) {
+                        kChart.subscribeCrosshairMove(param => {
+                            if (param.time) {
+                                const dataPoint = enriched.find(d => d.time === param.time);
+                                if (dataPoint) setHoverData(dataPoint);
+                            } else {
+                                setHoverData(enriched[enriched.length - 1]);
+                            }
+                        });
+                    }
+                    
+                    // Set default hover to latest
+                    setHoverData(enriched[enriched.length - 1]);
+
+                    try {
+                        s.kSeries.setData(chartDataToRender);
+                        s.ma5Series.setData(chartDataToRender.map((d, i) => ({ time: d.time, value: ma5[i] })));
+                        s.ma20Series.setData(chartDataToRender.map((d, i) => ({ time: d.time, value: ma20[i] })));
+                        s.ma60Series.setData(chartDataToRender.map((d, i) => ({ time: d.time, value: ma60[i] })));
+                        s.vSeries.setData(chartDataToRender.map(data => ({ time: data.time, value: data.volume, color: data.close >= data.open ? 'rgba(239, 68, 68, 0.6)' : 'rgba(34, 197, 94, 0.6)' })));
+                        s.macdDifSeries.setData(chartDataToRender.map((d, i) => ({ time: d.time, value: dif[i] || 0 })));
+                        s.macdDeaSeries.setData(chartDataToRender.map((d, i) => ({ time: d.time, value: dea[i] || 0 })));
+                        s.macdHistSeries.setData(chartDataToRender.map((d, i) => ({ time: d.time, value: macd[i] || 0, color: macd[i] >= 0 ? '#ef4444' : '#22c55e' })));
+                        s.kdjKSeries.setData(chartDataToRender.map((v, i) => ({ time: v.time, value: k[i] || 50 })));
+                        s.kdjDSeries.setData(chartDataToRender.map((v, i) => ({ time: v.time, value: d[i] || 50 })));
+                        s.kdjJSeries.setData(chartDataToRender.map((v, i) => ({ time: v.time, value: j[i] || 50 })));
+                    } catch(e) {}
                 }
-            }, [timeframe, chartData, initCharts, updateChartData]);
+            }, [chartDataToRender, initCharts]);
 
 
             // ==========================================
-            // 第一階段：極速加載即時報價與圖表
+            // 第一階段：極速加載即時報價與圖表 (互不阻塞)
             // ==========================================
             useEffect(() => {
                 let isCurrent = true;
@@ -581,66 +598,47 @@
                 const loadFastData = async () => {
                     setIsChartLoading(true);
                     setError(null);
-                    setLiveQuote({ price: '讀取中', change: '---', percent: '---', open: '---', high: '---', low: '---', volume: '0', marketCap: '---', pe: '---', pb: '---', yield: '---' });
+                    
+                    // 重置狀態以防殘影
+                    setLiveQuote({ price: null, change: null, percent: null, open: null, high: null, low: null, volume: null, marketCap: '---', pe: '---', pb: '---', yield: '---' });
+                    setBaseHistoryData([]);
+                    setLiveTickData(null);
                     setHoverData(null);
                     
                     const matched = fullStockList.find(s => s.stock_id === stockId);
                     setCurrentName(matched ? matched.stock_name : stockId);
 
-                    let history = [];
-                    let live = null;
-
-                    try {
-                        const results = await Promise.all([
-                            fetchHistoryData(stockId),
-                            fetchRealTimeAndFundamentals(stockId)
-                        ]);
-                        history = results[0] || [];
-                        live = results[1];
-                    } catch (e) {
-                        if (isCurrent) setError(`資料源連線不穩，請稍後再試。`);
-                    }
-
-                    if (!isCurrent || fetchId !== currentFetchId.current) return;
-
-                    let mergedHistory = [...history];
-
-                    if (live) {
-                        setLiveQuote(live);
-                        
-                        const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
-                        
-                        if (mergedHistory.length > 0) {
-                            const lastCandle = mergedHistory[mergedHistory.length - 1];
-                            if (lastCandle.time < todayStr) {
-                                mergedHistory.push({ time: todayStr, open: Number(live.open), high: Number(live.high), low: Number(live.low), close: Number(live.close), volume: Number(live.volume) });
-                            } else if (lastCandle.time === todayStr) {
-                                lastCandle.open = Number(live.open);
-                                lastCandle.high = Math.max(lastCandle.high, Number(live.high));
-                                lastCandle.low = Math.min(lastCandle.low, Number(live.low));
-                                lastCandle.close = Number(live.close);
-                                lastCandle.volume = Math.max(lastCandle.volume, Number(live.volume));
-                            }
+                    // A. 發送即時報價抓取
+                    fetchRealTimeAndFundamentals(stockId).then(live => {
+                        if (!isCurrent || fetchId !== currentFetchId.current) return;
+                        if (live) {
+                            setLiveQuote({
+                                price: live.price,
+                                change: live.change,
+                                percent: live.percent,
+                                open: live.open,
+                                high: live.high,
+                                low: live.low,
+                                volume: live.volume,
+                                marketCap: live.marketCap,
+                                pe: live.pe,
+                                pb: live.pb,
+                                yield: live.yield
+                            });
+                            setLiveTickData(live);
                         } else {
-                            mergedHistory.push({ time: todayStr, open: Number(live.open), high: Number(live.high), low: Number(live.low), close: Number(live.close), volume: Number(live.volume) });
+                            setLiveQuote(prev => ({ ...prev, price: '查無報價' }));
                         }
-                    } else if (mergedHistory.length > 0) {
-                        const latest = mergedHistory[mergedHistory.length - 1];
-                        const prev = mergedHistory.length > 1 ? mergedHistory[mergedHistory.length - 2] : latest;
-                        const change = latest.close - prev.close;
-                        setLiveQuote(prevQ => ({
-                            ...prevQ,
-                            price: latest.close.toFixed(2),
-                            change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
-                            percent: (change > 0 ? '+' : '') + (prev.close !== 0 ? ((change / prev.close) * 100).toFixed(2) : '0.00') + '%',
-                            open: latest.open.toFixed(2), high: latest.high.toFixed(2), low: latest.low.toFixed(2), volume: latest.volume || 0
-                        }));
-                    } else {
-                        setLiveQuote(prev => ({ ...prev, price: '查無報價', change: '---', percent: '---' }));
-                    }
+                    });
 
-                    setChartData(mergedHistory);
-                    setIsChartLoading(false);
+                    // B. 發送歷史資料抓取
+                    fetchHistoryData(stockId).then(history => {
+                        if (!isCurrent || fetchId !== currentFetchId.current) return;
+                        if (history && history.length > 0) {
+                            setBaseHistoryData(history);
+                        }
+                        setIsChartLoading(false); // 歷史圖表加載完畢即可解除遮罩
+                    });
                 };
 
                 loadFastData();
@@ -649,7 +647,7 @@
 
 
             // ==========================================
-            // 第二階段：背景執行 AI 深度分析
+            // 第二階段：背景執行 Groq AI 分析
             // ==========================================
             useEffect(() => {
                 let isCurrent = true;
@@ -668,11 +666,11 @@
                     }
 
                     try {
-                        const safeModel = aiModel ? aiModel.replace(/[^a-z0-9.-]/gi, '') : "llama-3.3-70b-versatile";
+                        const safeModel = aiModel ? aiModel.replace(/[^a-z0-9.-]/gi, '') : defaultModel;
                         const targetName = currentName || stockId;
                         
                         const prompt = `分析台股代號[${stockId}]，名稱[${targetName}]。
-                        任務：提供大盤聯動、估值、營收成長、風險預警、籌碼面、資金流向與最新動態。
+                        任務：提供大盤聯動、營收成長、風險預警、籌碼面、資金流向與最新動態。
                         【最高強制指令】：
                         1. 絕對禁止使用任何表情符號或特殊圖形。
                         2. 若缺乏精確數據，請運用金融知識給出合理的「市場預估值」或「趨勢描述 (如: 偏強、衰退)」，絕對不允許填入 "---" 或留白。
@@ -762,21 +760,20 @@
 
             const saveSettings = () => { 
                 const cleanKey = customKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
-                const cleanModel = aiModel.replace(/[^a-z0-9.-]/gi, '') || 'llama-3.3-70b-versatile';
+                const cleanModel = aiModel.replace(/[^a-z0-9.-]/gi, '') || defaultModel;
                 localStorage.setItem('groq_api_key', cleanKey); 
                 localStorage.setItem('groq_model_name', cleanModel);
                 setCustomKey(cleanKey);
                 setAiModel(cleanModel);
                 setShowSettings(false); 
                 
-                // 強制觸發重讀
                 const temp = stockId;
                 setStockId("");
                 setTimeout(() => setStockId(temp), 10);
             };
 
             const isUp = liveQuote.change && !String(liveQuote.change).includes('-');
-            const priceColor = !liveQuote.change || String(liveQuote.change) === '0.00' || String(liveQuote.change) === '0' || String(liveQuote.change) === '讀取中' || String(liveQuote.change) === '查無報價' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
+            const priceColor = liveQuote.price === null || String(liveQuote.price) === '讀取中' || String(liveQuote.price) === '查無報價' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
             const zenClass = zenMode ? "fixed inset-0 z-[9999] bg-[#030303] p-1 lg:p-3" : "";
             const disableInput = isChartLoading; 
             
@@ -796,10 +793,10 @@
                                     </div>
                                     <div className="h-6 w-px bg-gray-700 mx-1"></div>
                                     <div className="flex items-baseline gap-2">
-                                        <span className={`text-3xl lg:text-4xl font-black font-mono tracking-tighter ${priceColor}`}>{liveQuote.price}</span>
+                                        <span className={`text-3xl lg:text-4xl font-black font-mono tracking-tighter ${priceColor}`}>{liveQuote.price || '讀取中'}</span>
                                         <div className="flex flex-col text-xs font-bold font-mono">
-                                            <span className={priceColor}>{liveQuote.change}</span>
-                                            <span className={priceColor}>{liveQuote.percent}</span>
+                                            <span className={priceColor}>{liveQuote.change || '---'}</span>
+                                            <span className={priceColor}>{liveQuote.percent || '---'}</span>
                                         </div>
                                     </div>
                                 </div>
@@ -898,12 +895,12 @@
                                                 return (
                                                     <div key={item.id} onClick={() => executeJump(item.id)} className={`flex justify-between items-center p-1.5 rounded cursor-pointer transition-all duration-200 border ${stockId === item.id ? 'bg-gray-800/60 border-gray-600 shadow-inner' : 'bg-transparent border-transparent hover:bg-gray-900/50'}`}>
                                                         <div className="flex flex-col">
-                                                            <span className="text-gray-200 font-bold text-[10px]">{item.name}</span>
+                                                            <span className="text-white font-bold text-[10px]">{item.name}</span>
                                                             <span className="text-gray-600 font-mono text-[8px]">{item.id}</span>
                                                         </div>
                                                         <div className="flex flex-col items-end">
-                                                            <span className={`font-mono font-bold text-[10px] ${colorClass}`}>{quote ? quote.price : '---'}</span>
-                                                            <span className={`font-mono text-[8px] ${colorClass}`}>{quote ? quote.percent : '---'}</span>
+                                                            <span className={`font-mono font-bold text-[10px] ${colorClass}`}>{quote ? fmtPrice(quote.price) : '---'}</span>
+                                                            <span className={`font-mono text-[8px] ${colorClass}`}>{quote ? formatPercent(quote.percent) : '---'}</span>
                                                         </div>
                                                     </div>
                                                 );
@@ -964,10 +961,10 @@
                                         <div className="flex items-center gap-3">
                                             <span className="text-green-400 font-bold text-[10px] tracking-widest uppercase">技術線圖</span>
                                             <div className="hidden sm:flex items-center gap-2 text-[9px] font-mono text-gray-400 bg-black/40 px-2 py-1 rounded border border-gray-800">
-                                                <span>開: <strong className="text-white">{hoverData?.open || liveQuote.open || '-'}</strong></span>
-                                                <span>高: <strong className="text-red-400">{hoverData?.high || liveQuote.high || '-'}</strong></span>
-                                                <span>低: <strong className="text-green-400">{hoverData?.low || liveQuote.low || '-'}</strong></span>
-                                                <span>量: <strong className="text-yellow-400">{hoverData?.volume || liveQuote.volume || '0'}</strong></span>
+                                                <span>開: <strong className="text-white">{fmtPrice(hoverData?.open || liveQuote.open)}</strong></span>
+                                                <span>高: <strong className="text-red-400">{fmtPrice(hoverData?.high || liveQuote.high)}</strong></span>
+                                                <span>低: <strong className="text-green-400">{fmtPrice(hoverData?.low || liveQuote.low)}</strong></span>
+                                                <span>量: <strong className="text-yellow-400">{fmtVol(hoverData?.volume || liveQuote.volume)}</strong> 張</span>
                                             </div>
                                         </div>
                                         <div className="flex border border-gray-700 rounded overflow-hidden bg-black/40">
@@ -989,36 +986,41 @@
                                                 <div className="bg-black/80 px-1.5 py-0.5 rounded text-gray-400 border border-gray-800">K線</div>
                                                 <div className="bg-black/80 px-1.5 py-0.5 rounded text-white border border-white/5">
                                                     <span className="text-gray-400 mr-2">{hoverData?.time || '最新'}</span>
-                                                    開:{hoverData?.open || liveQuote.open || '-'} 高:{hoverData?.high || liveQuote.high || '-'} 低:{hoverData?.low || liveQuote.low || '-'} 收:{hoverData?.close||'-'}
+                                                    開:{fmtPrice(hoverData?.open || liveQuote.open)} 高:{fmtPrice(hoverData?.high || liveQuote.high)} 低:{fmtPrice(hoverData?.low || liveQuote.low)} 收:{fmtPrice(hoverData?.close || liveQuote.price)}
                                                 </div>
-                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-yellow-500 border border-gray-800">MA5:{hoverData?.ma5?.toFixed(2)||'-'}</div>
-                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-blue-400 border border-gray-800">MA20:{hoverData?.ma20?.toFixed(2)||'-'}</div>
-                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-green-400 border border-gray-800">MA60:{hoverData?.ma60?.toFixed(2)||'-'}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-yellow-500 border border-gray-800">MA5:{fmtPrice(hoverData?.ma5)}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-blue-400 border border-gray-800">MA20:{fmtPrice(hoverData?.ma20)}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-green-400 border border-gray-800">MA60:{fmtPrice(hoverData?.ma60)}</div>
                                             </div>
                                             <div ref={containerRefs.kline} className="w-full h-full" />
                                         </div>
                                         
                                         <div className="relative w-full flex-[1.2] min-h-0 flex flex-col border-t border-gray-900 overflow-hidden">
                                             <div className="absolute top-0.5 left-2 z-10 flex gap-1 text-[9px] font-mono pointer-events-none">
-                                                <div className="text-gray-500 font-bold">Vol: {hoverData?.volume || '-'}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-gray-300 font-bold border border-white/5">成交量</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-blue-300 font-bold border border-white/5">
+                                                    Vol: {fmtVol(hoverData?.volume || liveQuote.volume)}
+                                                </div>
                                             </div>
                                             <div ref={containerRefs.vol} className="w-full h-full" />
                                         </div>
                                         
                                         <div className="relative w-full flex-[1.2] min-h-0 flex flex-col border-t border-gray-900 overflow-hidden">
                                             <div className="absolute top-0.5 left-2 z-10 flex gap-1 text-[9px] font-mono pointer-events-none">
-                                                <div className="text-gray-500">MACD</div>
-                                                <div className={hoverData?.macd >= 0 ? "text-red-500" : "text-green-500"}>{hoverData?.macd?.toFixed(2)||'-'}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-gray-300 font-bold border border-white/5">MACD (12,26,9)</div>
+                                                <div className={`bg-black/80 px-1.5 py-0.5 rounded border border-white/5 ${hoverData?.macd >= 0 ? "text-red-500" : "text-green-500"}`}>MACD:{fmtPrice(hoverData?.macd)}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-yellow-500 border border-white/5">DIF:{fmtPrice(hoverData?.dif)}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-blue-400 border border-white/5">DEA:{fmtPrice(hoverData?.dea)}</div>
                                             </div>
                                             <div ref={containerRefs.macd} className="w-full h-full" />
                                         </div>
                                         
                                         <div className="relative w-full flex-[1.2] min-h-0 flex flex-col border-t border-gray-900 overflow-hidden">
                                             <div className="absolute top-0.5 left-2 z-10 flex gap-1 text-[9px] font-mono pointer-events-none">
-                                                <div className="text-gray-500">KDJ</div>
-                                                <div className="text-white">K:{hoverData?.k?.toFixed(2)||'-'}</div>
-                                                <div className="text-yellow-500">D:{hoverData?.d?.toFixed(2)||'-'}</div>
-                                                <div className="text-pink-500">J:{hoverData?.j?.toFixed(2)||'-'}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-gray-300 font-bold border border-white/5">KDJ (9,3,3)</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-white border border-white/5">K:{fmtPrice(hoverData?.k)}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-yellow-500 border border-white/5">D:{fmtPrice(hoverData?.d)}</div>
+                                                <div className="bg-black/80 px-1.5 py-0.5 rounded text-pink-500 border border-white/5">J:{fmtPrice(hoverData?.j)}</div>
                                             </div>
                                             <div ref={containerRefs.kdj} className="w-full h-full" />
                                         </div>
