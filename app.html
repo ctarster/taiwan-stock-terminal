@@ -45,7 +45,7 @@
 
         const defaultModel = "llama-3.3-70b-versatile";
 
-        // --- 全局數值安全裝甲 (消滅無限小數點與 NaN) ---
+        // --- 全局數值安全裝甲 ---
         const safeNum = (val, fallback = 0) => {
             const n = Number(val);
             return (!isNaN(n) && isFinite(n)) ? n : fallback;
@@ -74,7 +74,7 @@
             return (isNaN(num) || !isFinite(num)) ? '0' : Math.round(num).toString();
         };
 
-        // --- 技術指標核心運算 (加入安全防護) ---
+        // --- 技術指標核心運算 ---
         const Indicators = {
             ema: (data, period) => {
                 if (!data || data.length === 0) return [];
@@ -104,8 +104,8 @@
                 for (let i = 0; i < history.length; i++) {
                     const start = Math.max(0, i - period + 1);
                     const slice = history.slice(start, i + 1);
-                    const low = Math.min(...slice.map(data => safeNum(data.low, data.close)));
-                    const high = Math.max(...slice.map(data => safeNum(data.high, data.close)));
+                    const low = Math.min(...slice.map(d => safeNum(d.low, d.close)));
+                    const high = Math.max(...slice.map(d => safeNum(d.high, d.close)));
                     const close = safeNum(history[i].close, 0);
                     const rsv = high === low ? 0 : ((close - low) / (high - low)) * 100;
                     k = (2 / 3) * k + (1 / 3) * rsv;
@@ -161,7 +161,7 @@
             }
         };
 
-        // --- 獨創：大逃殺多線程代理伺服器引擎 ---
+        // --- 獨創：嚴格指紋驗證的代理引擎 (解決假資料陷阱) ---
         const fetchFastestProxy = async (url, timeoutMs = 6000) => {
             const cb = `_cb=${Date.now()}_${Math.floor(Math.random() * 100000)}`;
             const safeUrl = url.includes('?') ? `${url}&${cb}` : `${url}?${cb}`;
@@ -169,15 +169,22 @@
             
             const proxies = [
                 `https://api.allorigins.win/raw?url=${encodedUrl}`,
-                `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`
+                `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`,
+                `https://corsproxy.io/?${encodedUrl}`
             ];
 
             try {
                 const result = await Promise.any(proxies.map(async (proxyUrl) => {
                     const res = await fetchWithTimeout(proxyUrl, { cache: 'no-store' }, timeoutMs);
-                    if (!res.ok) throw new Error('Bad Proxy');
+                    if (!res.ok) throw new Error('Bad Proxy Status');
                     const text = await res.text();
-                    return JSON.parse(text); 
+                    const json = JSON.parse(text);
+                    
+                    // 【核心防線】：確保回傳的 JSON 是真實的 Yahoo API 結構，而非 Proxy 的報錯網頁
+                    if (!json.chart && !json.quoteResponse) {
+                        throw new Error('Invalid Payload: Not Yahoo Data');
+                    }
+                    return json; 
                 }));
                 return result;
             } catch (e) {
@@ -188,10 +195,17 @@
         // --- 1. 極速真實數據引擎 (提供 1分K陣列 與 真實基本面，絕不造假) ---
         const fetchRealTimeAndFundamentals = async (target) => {
             for (let ext of ['.TW', '.TWO']) {
-                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1m&range=1d`;
-                const data = await fetchFastestProxy(url, 5000);
-                if (data && data.chart && data.chart.result) {
-                    const result = data.chart.result[0];
+                const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1m&range=1d`;
+                const fundUrl = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}${ext}`;
+                
+                // 並發抓取圖表與基礎數據
+                const [chartData, fundData] = await Promise.all([
+                    fetchFastestProxy(chartUrl, 5000),
+                    fetchFastestProxy(fundUrl, 4000)
+                ]);
+
+                if (chartData && chartData.chart && chartData.chart.result) {
+                    const result = chartData.chart.result[0];
                     const meta = result.meta;
                     if (!meta || !meta.regularMarketPrice) continue;
 
@@ -200,7 +214,6 @@
                     const change = currentPrice - prevClose;
                     const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
 
-                    // 萃取即時 1 分鐘 K 線陣列，供分時圖表使用
                     const timestamps = result.timestamp;
                     const quote = result.indicators?.quote?.[0];
                     const intradayCandles = [];
@@ -225,23 +238,19 @@
                         }
                     }
 
-                    // 順便同步抓取強硬的基本面數據 (不依賴 AI)
-                    let fundData = { marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---' };
-                    try {
-                        const fundUrl = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}${ext}`;
-                        const fundRes = await fetchFastestProxy(fundUrl, 3000);
-                        if (fundRes && fundRes.quoteResponse && fundRes.quoteResponse.result) {
-                            const r = fundRes.quoteResponse.result[0];
-                            if (r.marketCap) {
-                                fundData.marketCap = r.marketCap >= 1000000000000 ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" : (r.marketCap / 100000000).toFixed(2) + " 億";
-                            }
-                            fundData.pe = r.trailingPE ? r.trailingPE.toFixed(2) : "---";
-                            fundData.pb = r.priceToBook ? r.priceToBook.toFixed(2) : "---";
-                            fundData.yield = r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---";
-                            fundData.eps = r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---";
-                            fundData.forwardPE = r.forwardPE ? r.forwardPE.toFixed(2) : "---";
+                    // 處理基礎數據
+                    let fundamentals = { marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---' };
+                    if (fundData && fundData.quoteResponse && fundData.quoteResponse.result) {
+                        const r = fundData.quoteResponse.result[0];
+                        if (r) {
+                            if (r.marketCap) fundamentals.marketCap = r.marketCap >= 1000000000000 ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" : (r.marketCap / 100000000).toFixed(2) + " 億";
+                            fundamentals.pe = r.trailingPE ? r.trailingPE.toFixed(2) : "---";
+                            fundamentals.pb = r.priceToBook ? r.priceToBook.toFixed(2) : "---";
+                            fundamentals.yield = r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---";
+                            fundamentals.eps = r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---";
+                            fundamentals.forwardPE = r.forwardPE ? r.forwardPE.toFixed(2) : "---";
                         }
-                    } catch(e) {}
+                    }
 
                     return {
                         price: currentPrice,
@@ -253,14 +262,14 @@
                         close: currentPrice,
                         volume: intradayCandles.length > 0 ? intradayCandles.reduce((a, b) => a + b.volume, 0) / 1000 : 0,
                         intradayCandles: intradayCandles,
-                        ...fundData
+                        ...fundamentals
                     };
                 }
             }
             return null;
         };
 
-        // --- 2. 歷史圖表引擎 ---
+        // --- 2. 歷史圖表雙備援引擎 ---
         const fetchHistoryData = async (target) => {
             for (let ext of ['.TW', '.TWO']) {
                 const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1y`;
@@ -288,8 +297,35 @@
                     if (history.length > 0) return history;
                 }
             }
+
+            try {
+                const d = new Date(); d.setFullYear(d.getFullYear() - 1);
+                const res = await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`, {}, 4000);
+                const json = await res.json();
+                if (json.msg === 'success' && json.data && json.data.length > 0) {
+                    return json.data.map(i => ({ 
+                        time: i.date, open: Number(i.open), high: Number(i.max), low: Number(i.min), close: Number(i.close), volume: Number(i.Trading_Volume) 
+                    }));
+                }
+            } catch (e) { }
+
             return [];
         };
+
+        const getMockData = (symbol) => ({
+            name: `${symbol}`, industry: "尚未分析",
+            market: { taiex: "等待同步", sox: "等待同步", nasdaq: "等待同步" },
+            peers: [],
+            valuation: { rating: "---" },
+            growth: { mom: "---", yoy: "---", grossMargin: "---" },
+            risk: { level: "---", details: "請點擊右上角「設定」輸入 Groq 金鑰解鎖深度分析。左上角與圖表為絕對真實即時報價。" },
+            fund: { status: "等待設定金鑰..." },
+            chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "等待設定金鑰..." },
+            moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "無資料。" },
+            tech: { ma: "---", support: "---", pressure: "---" },
+            strategy: { score: 0, conclusion: "等待設定", short: "---", swing: "---", stop: "---" },
+            news: []
+        });
 
         const App = () => {
             const [stockId, setStockId] = useState('2330');
@@ -338,6 +374,7 @@
             const containerRefs = { kline: useRef(null), vol: useRef(null), macd: useRef(null), kdj: useRef(null) };
             
             const isChartInitialized = useRef(false);
+            const isSyncing = useRef(false);
             const currentFetchId = useRef(0);
 
             const isWatched = watchlist.some(w => w.id === stockId);
@@ -376,7 +413,6 @@
                 return () => { isActive = false; clearInterval(interval); };
             }, [watchlist]);
 
-            // 智慧快取載入全市場清單
             useEffect(() => {
                 const loadStockList = async () => {
                     try {
@@ -454,7 +490,7 @@
                 return () => document.removeEventListener('fullscreenchange', fn);
             }, []);
 
-            // --- 圖表初始化 ---
+            // --- 圖表初始化 (完美自適應) ---
             const initCharts = useCallback(() => {
                 if (!window.LightweightCharts || isChartInitialized.current || !containerRefs.kline.current) return;
                 
@@ -728,6 +764,7 @@
                     
                     if (!customKey) {
                         if (isCurrent && fetchId === currentFetchId.current) {
+                            setAiData(getMockData(stockId));
                             setIsAiLoading(false);
                         }
                         return;
