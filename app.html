@@ -158,26 +158,32 @@
             }
         };
 
-        // --- 多線程代理引擎 ---
+        // --- 終極防禦代理引擎 (解析檢驗) ---
         const fetchFastestProxy = async (url, timeoutMs = 6000) => {
-            const cb = `_cb=${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-            const safeUrl = url.includes('?') ? `${url}&${cb}` : `${url}?${cb}`;
-            const encodedUrl = encodeURIComponent(safeUrl);
-            
+            const encodedUrl = encodeURIComponent(url);
             const proxies = [
-                `https://api.allorigins.win/raw?url=${encodedUrl}`,
-                `https://corsproxy.io/?${encodedUrl}`,
+                `https://api.allorigins.win/get?url=${encodedUrl}`,
                 `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`
             ];
 
             try {
                 const result = await Promise.any(proxies.map(async (proxyUrl) => {
                     const res = await fetchWithTimeout(proxyUrl, { cache: 'no-store' }, timeoutMs);
-                    if (!res.ok) throw new Error('Bad Proxy');
+                    if (!res.ok) throw new Error('Proxy fail');
                     const text = await res.text();
-                    const json = JSON.parse(text);
-                    if (json && (json.chart || json.quoteResponse || json.msgArray || json.data)) {
-                        return json; 
+                    
+                    let json;
+                    if (proxyUrl.includes('allorigins')) {
+                        const parsed = JSON.parse(text);
+                        if (!parsed.contents) throw new Error('No contents');
+                        json = JSON.parse(parsed.contents);
+                    } else {
+                        json = JSON.parse(text);
+                    }
+                    
+                    // 驗證是否為有效負載
+                    if (json && (json.chart || json.quoteResponse || json.msgArray)) {
+                        return json;
                     }
                     throw new Error('Invalid Payload');
                 }));
@@ -187,108 +193,27 @@
             }
         };
 
-        // --- 獨創：絕對零延遲爬蟲 (突破外國 Proxy 造成的 20 分鐘延遲) ---
-        const scrapeAbsoluteRealTimePrice = async (target) => {
-            return new Promise((resolve) => {
-                let resolved = false;
-                const done = (price) => {
-                    if (!resolved && price) {
-                        resolved = true;
-                        resolve(price);
-                    }
-                };
-
-                // 線程 1：Google Finance HTML 爬蟲 (全球節點皆零延遲)
-                const fetchGoogle = async (ext) => {
-                    const url = `https://www.google.com/finance/quote/${target}:${ext}`;
-                    const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true&_=${Date.now()}`;
-                    try {
-                        const res = await fetchWithTimeout(proxy, {}, 5000);
-                        const data = await res.json();
-                        const match = data.contents.match(/class="YMlKec fxKbKc">[^0-9]*([0-9.,]+)/);
-                        if (match) done(Number(match[1].replace(/,/g, '')));
-                    } catch(e) {}
-                };
-
-                // 線程 2：Yahoo TW 網頁初始狀態爬蟲 (絕對即時)
-                const fetchYahooTW = async () => {
-                    const url = `https://tw.stock.yahoo.com/quote/${target}`;
-                    const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true&_=${Date.now()}`;
-                    try {
-                        const res = await fetchWithTimeout(proxy, {}, 5000);
-                        const data = await res.json();
-                        const match = data.contents.match(/"regularMarketPrice":\s*([0-9.]+)/);
-                        if (match) done(Number(match[1]));
-                    } catch(e) {}
-                };
-
-                fetchGoogle('TPE');
-                fetchGoogle('TWO');
-                fetchYahooTW();
-
-                // 若 5 秒內皆失敗則放行 null，由備用 API 接手
-                setTimeout(() => { if (!resolved) resolve(null); }, 5000);
-            });
-        };
-
-        // --- 混合型即時引擎：爬蟲價格 + Yahoo 基礎面 ---
-        const fetchRealTimeAndFundamentals = async (target) => {
-            // 背景並發：抓取真實 0 延遲價格 + Yahoo V7 基本面
-            const [realPrice, yahooDataRaw] = await Promise.all([
-                scrapeAbsoluteRealTimePrice(target),
-                (async () => {
-                    for (let ext of ['.TW', '.TWO']) {
-                        const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}${ext}`;
-                        const data = await fetchFastestProxy(url, 5000);
-                        if (data && data.quoteResponse && data.quoteResponse.result && data.quoteResponse.result[0]) {
-                            return Object.assign(data.quoteResponse.result[0], { _ext: ext });
-                        }
-                    }
-                    return null;
-                })()
-            ]);
-
-            if (!yahooDataRaw && !realPrice) return null;
-
-            const r = yahooDataRaw || {};
-            // 開盤防呆：若 Yahoo 傳回 null，以真實價格或 0 取代
-            const currentPrice = realPrice || safeNum(r.regularMarketPrice, 0);
-            const prevClose = safeNum(r.regularMarketPreviousClose, currentPrice);
-            const change = currentPrice - prevClose;
-            const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
-            
-            let marketCapStr = "---";
-            if (r.marketCap) {
-                marketCapStr = r.marketCap >= 1000000000000 
-                    ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" 
-                    : (r.marketCap / 100000000).toFixed(2) + " 億";
-            }
-
-            // 確保開高低收安全無虞
-            let open = safeNum(r.regularMarketOpen, currentPrice);
-            let high = Math.max(safeNum(r.regularMarketDayHigh, currentPrice), currentPrice);
-            let low = Math.min(safeNum(r.regularMarketDayLow, currentPrice), currentPrice);
-
-            return {
-                price: currentPrice,
-                change: change,
-                percent: percent,
-                open: open,
-                high: high,
-                low: low,
-                close: currentPrice,
-                volume: safeNum(r.regularMarketVolume, 0) / 1000,
-                marketCap: marketCapStr,
-                pe: r.trailingPE ? r.trailingPE.toFixed(2) : "---",
-                pb: r.priceToBook ? r.priceToBook.toFixed(2) : "---",
-                yield: r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---",
-                eps: r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---",
-                forwardPE: r.forwardPE ? r.forwardPE.toFixed(2) : "---"
-            };
-        };
-
-        // --- 歷史圖表引擎 ---
+        // --- 1. 直連級歷史圖表引擎 (FinMind 絕對優先，確保圖表 100% 顯示) ---
         const fetchHistoryData = async (target) => {
+            // FinMind (免代理，直連最穩)
+            try {
+                const d = new Date(); d.setFullYear(d.getFullYear() - 2); 
+                const startDate = d.toISOString().split('T')[0];
+                const res = await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${startDate}`, {}, 5000);
+                const json = await res.json();
+                if (json.msg === 'success' && json.data && json.data.length > 0) {
+                    return json.data.map(i => ({ 
+                        time: i.date, 
+                        open: safeNum(i.open), 
+                        high: safeNum(i.max), 
+                        low: safeNum(i.min), 
+                        close: safeNum(i.close), 
+                        volume: safeNum(i.Trading_Volume) / 1000
+                    }));
+                }
+            } catch (e) { console.warn("FinMind 歷史資料獲取失敗，切換備援"); }
+
+            // 備援 Yahoo
             for (let ext of ['.TW', '.TWO']) {
                 const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1y`;
                 const data = await fetchFastestProxy(url, 6000);
@@ -309,10 +234,101 @@
                             high: safeNum(quote.high[i], 0), 
                             low: safeNum(quote.low[i], 0), 
                             close: safeNum(quote.close[i], 0), 
-                            volume: safeNum(quote.volume[i], 0)
+                            volume: safeNum(quote.volume[i], 0) / 1000
                         });
                     }
                     if (history.length > 0) return history;
+                }
+            }
+            return [];
+        };
+
+        // --- 2. 混合型即時報價引擎 (Yahoo Quote + TWSE 雙重保險) ---
+        const fetchRealTimeAndFundamentals = async (target) => {
+            // A. 嘗試 Yahoo V7 Quote
+            for (let ext of ['.TW', '.TWO']) {
+                const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}${ext}`;
+                const data = await fetchFastestProxy(url, 4000);
+                if (data && data.quoteResponse && data.quoteResponse.result && data.quoteResponse.result.length > 0) {
+                    const r = data.quoteResponse.result[0];
+                    const currentPrice = safeNum(r.regularMarketPrice, 0);
+                    const prevClose = safeNum(r.regularMarketPreviousClose, currentPrice);
+                    const change = currentPrice - prevClose;
+                    const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
+                    
+                    let marketCapStr = "---";
+                    if (r.marketCap) {
+                        marketCapStr = r.marketCap >= 1000000000000 
+                            ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" 
+                            : (r.marketCap / 100000000).toFixed(2) + " 億";
+                    }
+
+                    return {
+                        price: currentPrice,
+                        change: change,
+                        percent: percent,
+                        open: safeNum(r.regularMarketOpen, currentPrice),
+                        high: Math.max(safeNum(r.regularMarketDayHigh, currentPrice), currentPrice),
+                        low: Math.min(safeNum(r.regularMarketDayLow, currentPrice), currentPrice),
+                        close: currentPrice,
+                        volume: safeNum(r.regularMarketVolume, 0) / 1000,
+                        marketCap: marketCapStr,
+                        pe: r.trailingPE ? r.trailingPE.toFixed(2) : "---",
+                        pb: r.priceToBook ? r.priceToBook.toFixed(2) : "---",
+                        yield: r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---",
+                        eps: r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---",
+                        forwardPE: r.forwardPE ? r.forwardPE.toFixed(2) : "---"
+                    };
+                }
+            }
+
+            // B. 嘗試 TWSE MIS API 備援 (絕對即時，但無基本面)
+            const twseUrl = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${target}.tw|otc_${target}.tw&json=1&delay=0`;
+            const twseData = await fetchFastestProxy(twseUrl, 4000);
+            if (twseData && twseData.msgArray && twseData.msgArray.length > 0) {
+                const r = twseData.msgArray[0];
+                const prevClose = safeNum(r.y, 0);
+                const currentPrice = r.z !== '-' ? safeNum(r.z, prevClose) : prevClose;
+                const change = currentPrice - prevClose;
+                const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
+                return {
+                    price: currentPrice, change: change, percent: percent,
+                    open: r.o !== '-' ? safeNum(r.o, currentPrice) : currentPrice,
+                    high: r.h !== '-' ? safeNum(r.h, currentPrice) : currentPrice,
+                    low: r.l !== '-' ? safeNum(r.l, currentPrice) : currentPrice,
+                    close: currentPrice,
+                    volume: safeNum(r.v, 0),
+                    marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---'
+                };
+            }
+            return null;
+        };
+
+        // --- 3. 獨立分時圖引擎 (專供 1m) ---
+        const fetchIntradayData = async (target) => {
+            for (let ext of ['.TW', '.TWO']) {
+                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1m&range=1d`;
+                const data = await fetchFastestProxy(url, 4000);
+                if (data && data.chart && data.chart.result) {
+                    const result = data.chart.result[0];
+                    const timestamps = result.timestamp;
+                    const quote = result.indicators?.quote?.[0];
+                    if (!timestamps || !quote) continue;
+                    
+                    const intraday = [];
+                    for (let i = 0; i < timestamps.length; i++) {
+                        const c = quote.close[i];
+                        if (c === null) continue;
+                        intraday.push({
+                            time: timestamps[i] + 28800, // UTC+8
+                            open: safeNum(quote.open[i], c),
+                            high: safeNum(quote.high[i], c),
+                            low: safeNum(quote.low[i], c),
+                            close: safeNum(c),
+                            volume: safeNum(quote.volume[i], 0) / 1000
+                        });
+                    }
+                    if (intraday.length > 0) return intraday;
                 }
             }
             return [];
@@ -343,6 +359,7 @@
             
             const [liveQuote, setLiveQuote] = useState({ price: null, change: null, percent: null, open: null, high: null, low: null, volume: null, marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---' });
             const [baseHistoryData, setBaseHistoryData] = useState([]); 
+            const [intradayData, setIntradayData] = useState([]); 
             const [liveTickData, setLiveTickData] = useState(null); 
             const [aiData, setAiData] = useState(null);
             
@@ -564,6 +581,18 @@
 
             // --- 即時合成 K 棒邏輯與時間軸判斷 (加入開盤防呆) ---
             const chartDataToRender = useMemo(() => {
+                if (timeframe === '1m') {
+                    if (intradayData.length > 0 && liveTickData) {
+                        const current = [...intradayData];
+                        const last = current[current.length - 1];
+                        last.close = safeNum(liveTickData.price, last.close);
+                        last.high = Math.max(last.high, last.close);
+                        last.low = Math.min(last.low, last.close);
+                        return current;
+                    }
+                    return intradayData;
+                }
+
                 if (!baseHistoryData || baseHistoryData.length === 0) return [];
                 
                 const sorted = [...baseHistoryData].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
@@ -602,7 +631,7 @@
                 
                 if (timeframe === '1W') return aggregateWeekly(uniqueHistory);
                 return uniqueHistory;
-            }, [baseHistoryData, liveTickData, timeframe]);
+            }, [baseHistoryData, intradayData, liveTickData, timeframe]);
 
             // 圖表渲染核心
             useEffect(() => {
@@ -664,6 +693,7 @@
                     setError(null);
                     setLiveQuote({ price: null, change: null, percent: null, open: null, high: null, low: null, volume: null, marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---' });
                     setBaseHistoryData([]);
+                    setIntradayData([]);
                     setLiveTickData(null);
                     setHoverData(null);
                     
@@ -672,14 +702,17 @@
 
                     let live = null;
                     let history = [];
+                    let intraday = [];
 
                     try {
                         const results = await Promise.all([
                             fetchRealTimeAndFundamentals(stockId),
-                            fetchHistoryData(stockId)
+                            fetchHistoryData(stockId),
+                            fetchIntradayData(stockId)
                         ]);
                         live = results[0];
                         history = results[1] || [];
+                        intraday = results[2] || [];
                     } catch (e) {
                         if (isCurrent) setError(`資料源連線不穩，請稍後再試。`);
                     }
@@ -688,6 +721,9 @@
 
                     if (history && history.length > 0) {
                         setBaseHistoryData(history);
+                    }
+                    if (intraday && intraday.length > 0) {
+                        setIntradayData(intraday);
                     }
 
                     if (live) {
@@ -706,7 +742,7 @@
                         }));
                     } else {
                         setLiveQuote(prev => ({ ...prev, price: '查無報價' }));
-                        setError(`無法取得標的 [${stockId}] 的資料。`);
+                        setError(`無法取得標的 [${stockId}] 的資料。請確認代號是否正確。`);
                     }
 
                     setIsChartLoading(false); 
