@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>量化決策終端 PRO</title>
+    <!-- 引入外部核心資源 -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -53,21 +54,18 @@
             const num = Number(val);
             return (isNaN(num) || !isFinite(num)) ? '---' : num.toFixed(2);
         };
-
         const formatChange = (val) => {
             if (val === undefined || val === null || val === '-' || val === '---') return '---';
             const num = Number(val);
             if (isNaN(num) || !isFinite(num)) return '---';
             return num > 0 ? `+${num.toFixed(2)}` : num.toFixed(2);
         };
-
         const formatPercent = (val) => {
             if (val === undefined || val === null || val === '-' || val === '---') return '---';
             const num = Number(val);
             if (isNaN(num) || !isFinite(num)) return '---';
             return num > 0 ? `+${num.toFixed(2)}%` : `${num.toFixed(2)}%`;
         };
-
         const fmtVol = (val) => {
             if (val === undefined || val === null || val === '-' || val === '---') return '0';
             const num = Number(val);
@@ -87,6 +85,7 @@
                 });
             },
             calculateMACD: (closePrices) => {
+                const empty = { dif: [], dea: [], macd: [] };
                 if (!closePrices || closePrices.length < 26) return { dif: closePrices.map(()=>0), dea: closePrices.map(()=>0), macd: closePrices.map(()=>0) };
                 const ema12 = Indicators.ema(closePrices, 12);
                 const ema26 = Indicators.ema(closePrices, 26);
@@ -104,8 +103,8 @@
                     const start = Math.max(0, i - period + 1);
                     const slice = history.slice(start, i + 1);
                     const close = safeNum(history[i].close, 0);
-                    const low = Math.min(...slice.map(data => safeNum(data.low, close)));
-                    const high = Math.max(...slice.map(data => safeNum(data.high, close)));
+                    const low = Math.min(...slice.map(d => safeNum(d.low, close)));
+                    const high = Math.max(...slice.map(d => safeNum(d.high, close)));
                     const rsv = high === low ? 0 : ((close - low) / (high - low)) * 100;
                     k = (2 / 3) * k + (1 / 3) * rsv;
                     d = (2 / 3) * d + (1 / 3) * k;
@@ -147,7 +146,6 @@
             return weekly;
         };
 
-        // --- 超強網路與代理層 ---
         const fetchWithTimeout = async (url, options = {}, timeoutMs = 8000) => {
             const controller = new AbortController();
             const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -161,54 +159,55 @@
             }
         };
 
-        const fetchFastestProxy = async (url, timeoutMs = 6000) => {
+        // --- 獨創：防彈大逃殺多線程代理引擎 (指紋驗證過濾假資料) ---
+        const fetchFastestProxy = async (url, timeoutMs = 7000) => {
             const cb = `_cb=${Date.now()}_${Math.floor(Math.random() * 100000)}`;
             const safeUrl = url.includes('?') ? `${url}&${cb}` : `${url}?${cb}`;
             const encodedUrl = encodeURIComponent(safeUrl);
             
             const proxies = [
                 { url: `https://api.allorigins.win/get?url=${encodedUrl}&disableCache=true`, isWrapper: true },
-                { url: `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`, isWrapper: false }
+                { url: `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`, isWrapper: false },
+                { url: `https://api.allorigins.win/raw?url=${encodedUrl}`, isWrapper: false }
             ];
 
-            const controllers = [];
-            const makeReq = async (proxyObj) => {
-                const controller = new AbortController();
-                controllers.push(controller);
-                const id = setTimeout(() => controller.abort(), timeoutMs);
-                try {
-                    const res = await fetch(proxyObj.url, { cache: 'no-store', signal: controller.signal });
-                    clearTimeout(id);
-                    if (!res.ok) throw new Error('Bad Proxy Status');
-                    const text = await res.text();
-                    let json;
-                    if (proxyObj.isWrapper) {
-                        const parsed = JSON.parse(text);
-                        if (!parsed.contents) throw new Error('No contents');
-                        json = JSON.parse(parsed.contents);
-                    } else {
-                        json = JSON.parse(text);
-                    }
-                    if (json && (json.chart || json.quoteResponse || json.msgArray || json.data)) {
-                        return json;
-                    }
-                    throw new Error('Invalid Payload');
-                } catch (e) {
-                    clearTimeout(id);
-                    throw e;
-                }
-            };
+            const controllers = proxies.map(() => new AbortController());
 
             try {
-                const result = await Promise.any(proxies.map(p => makeReq(p)));
-                controllers.forEach(c => c.abort()); // 成功後切斷其他連線
+                const result = await Promise.any(proxies.map(async (proxyObj, idx) => {
+                    const id = setTimeout(() => controllers[idx].abort(), timeoutMs);
+                    try {
+                        const res = await fetch(proxyObj.url, { cache: 'no-store', signal: controllers[idx].signal });
+                        clearTimeout(id);
+                        if (!res.ok) throw new Error('Bad Status');
+                        const text = await res.text();
+                        let json;
+                        if (proxyObj.isWrapper) {
+                            const parsed = JSON.parse(text);
+                            if (!parsed.contents) throw new Error('No contents');
+                            json = JSON.parse(parsed.contents);
+                        } else {
+                            json = JSON.parse(text);
+                        }
+                        
+                        // 資料指紋驗證 (防護 Yahoo 回傳的錯誤 HTML 或空白結果)
+                        if (json && (json.chart || json.quoteResponse || json.msgArray || json.data)) {
+                            return json;
+                        }
+                        throw new Error('Invalid Payload Structure');
+                    } catch (e) {
+                        clearTimeout(id);
+                        throw e;
+                    }
+                }));
+                controllers.forEach(c => c.abort()); // 切斷剩餘連線
                 return result;
             } catch (e) {
                 return null;
             }
         };
 
-        // --- 1. 極速絕對真實數據引擎 (強制暴力破解 1m 陣列，獲取當下跳動價格) ---
+        // --- 1. 極速真實報價與基本面雙軌併發引擎 (解決依賴崩潰) ---
         const fetchRealTimeAndFundamentals = async (target) => {
             for (let ext of ['.TW', '.TWO']) {
                 const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1m&range=1d`;
@@ -219,91 +218,109 @@
                     fetchFastestProxy(fundUrl, 5000)
                 ]);
 
-                if (chartData && chartData.chart && chartData.chart.result) {
-                    const result = chartData.chart.result[0];
-                    const meta = result.meta;
-                    const quote = result.indicators?.quote?.[0];
-                    if (!meta || !quote || !quote.close) continue;
+                let currentPrice = null, prevClose = 0, open = 0, high = 0, low = 0, volume = 0;
+                let valid = false;
 
-                    // 尋找最後一根包含有效數據的 1m K棒
-                    let lastIdx = -1;
-                    for (let i = quote.close.length - 1; i >= 0; i--) {
-                        if (quote.close[i] !== null) { lastIdx = i; break; }
+                // 優先使用 Quote V7 (最完整)
+                if (fundData && fundData.quoteResponse && fundData.quoteResponse.result && fundData.quoteResponse.result.length > 0) {
+                    const r = fundData.quoteResponse.result[0];
+                    currentPrice = safeNum(r.regularMarketPrice, 0);
+                    prevClose = safeNum(r.regularMarketPreviousClose, currentPrice);
+                    open = safeNum(r.regularMarketOpen, currentPrice);
+                    high = safeNum(r.regularMarketDayHigh, currentPrice);
+                    low = safeNum(r.regularMarketDayLow, currentPrice);
+                    volume = safeNum(r.regularMarketVolume, 0);
+                    valid = true;
+                } 
+                // 備援使用 Chart V8 
+                else if (chartData && chartData.chart && chartData.chart.result) {
+                    const meta = chartData.chart.result[0].meta;
+                    if (meta && meta.regularMarketPrice) {
+                        currentPrice = safeNum(meta.regularMarketPrice, 0);
+                        prevClose = safeNum(meta.chartPreviousClose, currentPrice);
+                        open = currentPrice; high = currentPrice; low = currentPrice; volume = 0;
+                        valid = true;
                     }
+                }
 
-                    if (lastIdx === -1) continue;
+                if (!valid) continue;
 
-                    // 強制採用 1 分鐘圖的最後一筆收盤價為現價，徹底解決 quote API 延遲與昨日報價問題
-                    const currentPrice = safeNum(quote.close[lastIdx], 0);
-                    const prevClose = safeNum(meta.chartPreviousClose, currentPrice);
-                    const change = currentPrice - prevClose;
-                    const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
+                const change = currentPrice - prevClose;
+                const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
 
-                    const timestamps = result.timestamp;
-                    const intradayCandles = [];
-                    const validOpens = [];
-                    const validHighs = [];
-                    const validLows = [];
-                    let totalVolume = 0;
+                // 萃取 1m K 線陣列
+                const intradayCandles = [];
+                if (chartData && chartData.chart && chartData.chart.result) {
+                    const timestamps = chartData.chart.result[0].timestamp || [];
+                    const quote = chartData.chart.result[0].indicators?.quote?.[0] || {};
+                    const closes = quote.close || [];
                     
-                    for (let i = 0; i <= lastIdx; i++) {
-                        const c = quote.close[i];
-                        const o = quote.open[i];
-                        const h = quote.high[i];
-                        const l = quote.low[i];
-                        const v = quote.volume[i];
-
-                        if (c !== null && o !== null && h !== null && l !== null) {
-                            validOpens.push(o);
-                            validHighs.push(h);
-                            validLows.push(l);
-                            totalVolume += (v || 0);
-
+                    for (let i = 0; i < timestamps.length; i++) {
+                        const c = closes[i];
+                        if (c !== null && c !== undefined) {
+                            const o = safeNum(quote.open?.[i], c);
+                            const h = safeNum(quote.high?.[i], c);
+                            const l = safeNum(quote.low?.[i], c);
+                            const v = safeNum(quote.volume?.[i], 0);
                             intradayCandles.push({
                                 time: timestamps[i] + 28800, // UTC+8
-                                open: safeNum(o, c),
-                                high: safeNum(h, c),
-                                low: safeNum(l, c),
-                                close: safeNum(c, 0),
-                                volume: safeNum(v, 0) / 1000
+                                open: o, high: h, low: l, close: c, volume: v / 1000
                             });
                         }
                     }
 
-                    let fundamentals = { marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---' };
-                    if (fundData && fundData.quoteResponse && fundData.quoteResponse.result) {
-                        const r = fundData.quoteResponse.result[0];
-                        if (r) {
-                            if (r.marketCap) fundamentals.marketCap = r.marketCap >= 1000000000000 ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" : (r.marketCap / 100000000).toFixed(2) + " 億";
-                            fundamentals.pe = r.trailingPE ? r.trailingPE.toFixed(2) : "---";
-                            fundamentals.pb = r.priceToBook ? r.priceToBook.toFixed(2) : "---";
-                            fundamentals.yield = r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---";
-                            fundamentals.eps = r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---";
-                            fundamentals.forwardPE = r.forwardPE ? r.forwardPE.toFixed(2) : "---";
-                        }
+                    if (intradayCandles.length > 0) {
+                        open = intradayCandles[0].open;
+                        high = Math.max(high, ...intradayCandles.map(c=>c.high));
+                        low = Math.min(low, ...intradayCandles.map(c=>c.low));
+                        volume = Math.max(volume, intradayCandles.reduce((a,b)=>a+(b.volume*1000), 0));
                     }
-
-                    return {
-                        price: currentPrice,
-                        change: change,
-                        percent: percent,
-                        open: validOpens.length > 0 ? validOpens[0] : currentPrice,
-                        high: validHighs.length > 0 ? Math.max(...validHighs) : currentPrice,
-                        low: validLows.length > 0 ? Math.min(...validLows) : currentPrice,
-                        close: currentPrice,
-                        volume: totalVolume / 1000,
-                        intradayCandles: intradayCandles,
-                        ...fundamentals
-                    };
                 }
+
+                // 解析基本面
+                let fundamentals = { marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---' };
+                if (fundData && fundData.quoteResponse && fundData.quoteResponse.result && fundData.quoteResponse.result.length > 0) {
+                    const r = fundData.quoteResponse.result[0];
+                    if (r.marketCap) fundamentals.marketCap = r.marketCap >= 1000000000000 ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" : (r.marketCap / 100000000).toFixed(2) + " 億";
+                    fundamentals.pe = r.trailingPE ? r.trailingPE.toFixed(2) : "---";
+                    fundamentals.pb = r.priceToBook ? r.priceToBook.toFixed(2) : "---";
+                    fundamentals.yield = r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---";
+                    fundamentals.eps = r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---";
+                    fundamentals.forwardPE = r.forwardPE ? r.forwardPE.toFixed(2) : "---";
+                }
+
+                return {
+                    price: currentPrice, change: change, percent: percent,
+                    open: open, high: high, low: low, close: currentPrice, volume: volume / 1000,
+                    intradayCandles: intradayCandles,
+                    ...fundamentals
+                };
+            }
+
+            // TWSE 終極備援 (若 Yahoo 全部失效)
+            const twseUrl = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${target}.tw|otc_${target}.tw&json=1&delay=0`;
+            const twseData = await fetchFastestProxy(twseUrl, 4000);
+            if (twseData && twseData.msgArray && twseData.msgArray.length > 0) {
+                const r = twseData.msgArray[0];
+                const prevClose = safeNum(r.y, 0);
+                const currentPrice = r.z !== '-' ? safeNum(r.z, prevClose) : prevClose;
+                const change = currentPrice - prevClose;
+                return {
+                    price: currentPrice, change: change, percent: prevClose !== 0 ? (change / prevClose) * 100 : 0,
+                    open: r.o !== '-' ? safeNum(r.o, currentPrice) : currentPrice,
+                    high: r.h !== '-' ? safeNum(r.h, currentPrice) : currentPrice,
+                    low: r.l !== '-' ? safeNum(r.l, currentPrice) : currentPrice,
+                    close: currentPrice, volume: safeNum(r.v, 0), intradayCandles: [],
+                    marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---'
+                };
             }
             return null;
         };
 
-        // --- 2. 歷史圖表引擎 (過濾極端異常點) ---
+        // --- 2. 歷史圖表引擎 (Yahoo + FinMind 雙備援，確保圖表畫出) ---
         const fetchHistoryData = async (target) => {
             for (let ext of ['.TW', '.TWO']) {
-                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1y`;
+                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=2y`;
                 const data = await fetchFastestProxy(url, 6000);
                 if (data && data.chart && data.chart.result) {
                     const result = data.chart.result[0];
@@ -328,6 +345,24 @@
                     if (history.length > 0) return history;
                 }
             }
+
+            // FinMind 備援
+            try {
+                const d = new Date(); d.setFullYear(d.getFullYear() - 2);
+                const res = await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`, {}, 4000);
+                const json = await res.json();
+                if (json.msg === 'success' && json.data && json.data.length > 0) {
+                    return json.data.map(i => ({ 
+                        time: i.date, 
+                        open: safeNum(i.open), 
+                        high: safeNum(i.max), 
+                        low: safeNum(i.min), 
+                        close: safeNum(i.close), 
+                        volume: safeNum(i.Trading_Volume) / 1000 
+                    }));
+                }
+            } catch (e) { }
+
             return [];
         };
 
@@ -337,7 +372,7 @@
             peers: [],
             valuation: { rating: "---" },
             growth: { mom: "---", yoy: "---", grossMargin: "---" },
-            risk: { level: "---", details: "請點擊右上角「設定」輸入 Groq 金鑰解鎖深度分析。圖表與左上角顯示為真實即時報價。" },
+            risk: { level: "---", details: "請點擊右上角「設定」輸入 Groq 金鑰解鎖深度分析。左上角與圖表為絕對真實即時報價。" },
             fund: { status: "等待設定金鑰..." },
             chips: { foreign: "---", trust: "---", big: "---", retail: "---", status: "等待設定金鑰..." },
             moneyFlow: { inflow: "---", outflow: "---", net: "---", analysis: "無資料。" },
@@ -406,7 +441,7 @@
                 });
             };
 
-            // 自選清單背景安全刷新 (5 秒超極速輪詢)
+            // 自選清單背景安全刷新
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -575,7 +610,7 @@
                 isChartInitialized.current = true;
             }, []);
 
-            // --- 即時合成 K 棒邏輯與時間軸判斷 (絕對覆寫技術) ---
+            // --- 即時合成 K 棒邏輯與時間軸判斷 ---
             const chartDataToRender = useMemo(() => {
                 if (timeframe === '1m') {
                     return liveTickData?.intradayCandles || [];
@@ -593,9 +628,7 @@
                     }
                 }
 
-                // 將即時資料絕對安全縫合進日線歷史
                 if (liveTickData && liveTickData.close > 0) {
-                    // 獲取台灣當地時間 (UTC+8) 作為比對字串
                     const now = new Date();
                     const twUtc = now.getTime() + (now.getTimezoneOffset() * 60000) + (8 * 3600000);
                     const twDate = new Date(twUtc);
@@ -611,7 +644,6 @@
                     if (lastCandle && lastCandle.time < todayStr) {
                         uniqueHistory.push({ time: todayStr, open: lOpen, high: lHigh, low: lLow, close: lClose, volume: lVol });
                     } else if (lastCandle && lastCandle.time === todayStr) {
-                        // 強制以即時報價的開高低收完全覆蓋歷史舊資料
                         lastCandle.open = lOpen;
                         lastCandle.high = lHigh;
                         lastCandle.low = lLow;
@@ -666,6 +698,7 @@
                     setHoverData(enriched[enriched.length - 1]);
 
                     try {
+                        // 當資料為空時直接傳入空陣列清空圖表，避免錯誤
                         s.kSeries.setData(chartDataToRender);
                         s.ma5Series.setData(chartDataToRender.map((d, i) => ({ time: d.time, value: safeNum(ma5[i], 0) })));
                         s.ma20Series.setData(chartDataToRender.map((d, i) => ({ time: d.time, value: safeNum(ma20[i], 0) })));
@@ -678,12 +711,23 @@
                         s.kdjDSeries.setData(chartDataToRender.map((v, i) => ({ time: v.time, value: safeNum(d[i], 50) })));
                         s.kdjJSeries.setData(chartDataToRender.map((v, i) => ({ time: v.time, value: safeNum(j[i], 50) })));
                     } catch(e) {}
+                } else {
+                    // 若無資料，清空圖表防止殘留
+                    if (isChartInitialized.current) {
+                         const s = seriesRefs.current;
+                         if (s.kSeries) {
+                             s.kSeries.setData([]);
+                             s.ma5Series.setData([]); s.ma20Series.setData([]); s.ma60Series.setData([]);
+                             s.vSeries.setData([]); s.macdDifSeries.setData([]); s.macdDeaSeries.setData([]); s.macdHistSeries.setData([]);
+                             s.kdjKSeries.setData([]); s.kdjDSeries.setData([]); s.kdjJSeries.setData([]);
+                         }
+                    }
                 }
             }, [chartDataToRender, initCharts, timeframe]);
 
 
             // ==========================================
-            // 獨立解耦階段 1：極速加載初始即時報價與圖表
+            // 獨立解耦階段 1：極速加載初始報價與圖表
             // ==========================================
             useEffect(() => {
                 let isCurrent = true;
@@ -711,7 +755,7 @@
                         live = results[0];
                         history = results[1] || [];
                     } catch (e) {
-                        if (isCurrent) setError(`資料源連線不穩，請稍後再試。`);
+                        if (isCurrent) setError(`資料源連線異常。`);
                     }
 
                     if (!isCurrent || fetchId !== currentFetchId.current) return;
@@ -748,7 +792,7 @@
 
 
             // ==========================================
-            // 獨立解耦階段 1.5：背景 5 秒極速輪詢即時報價 (券商級)
+            // 獨立解耦階段 1.5：背景 5 秒極速輪詢即時報價
             // ==========================================
             useEffect(() => {
                 let isActive = true;
@@ -764,7 +808,6 @@
                     }
                 };
 
-                // 啟動 5 秒極速即時輪詢
                 timer = setInterval(pollData, 5000);
 
                 return () => {
@@ -887,14 +930,13 @@
                 setAiModel(cleanModel);
                 setShowSettings(false); 
                 
-                // 強制觸發重讀
                 const temp = stockId;
                 setStockId("");
                 setTimeout(() => setStockId(temp), 10);
             };
 
             const isUp = liveQuote.change && !String(liveQuote.change).includes('-');
-            const priceColor = liveQuote.price === null || String(liveQuote.price) === '讀取中' || String(liveQuote.price) === '查無報價' || String(liveQuote.price) === '連線失敗' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
+            const priceColor = liveQuote.price === null || String(liveQuote.price) === '讀取中' || String(liveQuote.price) === '查無報價' ? 'text-white' : isUp ? 'text-red-500' : 'text-green-500';
             const zenClass = zenMode ? "fixed inset-0 z-[9999] bg-[#030303] p-1 lg:p-3" : "";
             const disableInput = isChartLoading; 
             
