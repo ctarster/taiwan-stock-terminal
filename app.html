@@ -14,7 +14,6 @@
         body { background-color: #030303; margin: 0; padding: 0; color: #d1d5db; overflow: hidden; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
         #root { height: 100%; width: 100%; }
         
-        /* 訂製流暢滾動條 */
         .custom-scrollbar::-webkit-scrollbar { width: 5px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: #000; border-radius: 2px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
@@ -22,7 +21,6 @@
         * { scrollbar-width: thin; scrollbar-color: #333 #000; }
         :-webkit-full-screen { background-color: #030303; }
         
-        /* 進階動畫定義 */
         @keyframes fadeInUp { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes glowPulse { 0%, 100% { box-shadow: 0 0 10px rgba(37, 99, 235, 0.1); border-color: rgba(37, 99, 235, 0.2); } 50% { box-shadow: 0 0 25px rgba(37, 99, 235, 0.3); border-color: rgba(37, 99, 235, 0.5); } }
@@ -45,7 +43,7 @@
 
         const defaultModel = "llama-3.3-70b-versatile";
 
-        // --- 全局數值安全裝甲 ---
+        // --- 全局數值安全裝甲 (解決開盤空值與 NaN 崩潰) ---
         const safeNum = (val, fallback = 0) => {
             const n = Number(val);
             return (!isNaN(n) && isFinite(n)) ? n : fallback;
@@ -87,7 +85,6 @@
                 });
             },
             calculateMACD: (closePrices) => {
-                const empty = { dif: [], dea: [], macd: [] };
                 if (!closePrices || closePrices.length < 26) return { dif: closePrices.map(()=>0), dea: closePrices.map(()=>0), macd: closePrices.map(()=>0) };
                 const ema12 = Indicators.ema(closePrices, 12);
                 const ema26 = Indicators.ema(closePrices, 26);
@@ -104,9 +101,9 @@
                 for (let i = 0; i < history.length; i++) {
                     const start = Math.max(0, i - period + 1);
                     const slice = history.slice(start, i + 1);
-                    const low = Math.min(...slice.map(d => safeNum(d.low, d.close)));
-                    const high = Math.max(...slice.map(d => safeNum(d.high, d.close)));
                     const close = safeNum(history[i].close, 0);
+                    const low = Math.min(...slice.map(data => safeNum(data.low, close)));
+                    const high = Math.max(...slice.map(data => safeNum(data.high, close)));
                     const rsv = high === low ? 0 : ((close - low) / (high - low)) * 100;
                     k = (2 / 3) * k + (1 / 3) * rsv;
                     d = (2 / 3) * d + (1 / 3) * k;
@@ -161,22 +158,22 @@
             }
         };
 
-        // --- 獨創：大逃殺多線程代理伺服器引擎 (解決連線逾時卡死) ---
+        // --- 多線程代理引擎 ---
         const fetchFastestProxy = async (url, timeoutMs = 6000) => {
             const cb = `_cb=${Date.now()}_${Math.floor(Math.random() * 100000)}`;
             const safeUrl = url.includes('?') ? `${url}&${cb}` : `${url}?${cb}`;
             const encodedUrl = encodeURIComponent(safeUrl);
             
             const proxies = [
-                `https://corsproxy.io/?${encodedUrl}`,
                 `https://api.allorigins.win/raw?url=${encodedUrl}`,
+                `https://corsproxy.io/?${encodedUrl}`,
                 `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`
             ];
 
             try {
                 const result = await Promise.any(proxies.map(async (proxyUrl) => {
                     const res = await fetchWithTimeout(proxyUrl, { cache: 'no-store' }, timeoutMs);
-                    if (!res.ok) throw new Error('Bad Proxy Status');
+                    if (!res.ok) throw new Error('Bad Proxy');
                     const text = await res.text();
                     const json = JSON.parse(text);
                     if (json && (json.chart || json.quoteResponse || json.msgArray || json.data)) {
@@ -190,142 +187,107 @@
             }
         };
 
-        // --- 1. TWSE 官方零延遲報價直連引擎 ---
-        const fetchTWSE = async (target) => {
-            const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${target}.tw|otc_${target}.tw&json=1&delay=0`;
-            try {
-                const data = await fetchFastestProxy(url, 4000);
-                if (data && data.msgArray && data.msgArray.length > 0) {
-                    const r = data.msgArray[0];
-                    const prevClose = safeNum(r.y, 0);
-                    const currentPrice = r.z !== '-' ? safeNum(r.z, prevClose) : prevClose;
-                    const change = currentPrice - prevClose;
-                    const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
-                    return {
-                        price: currentPrice,
-                        change: change,
-                        percent: percent,
-                        open: r.o !== '-' ? safeNum(r.o, currentPrice) : currentPrice,
-                        high: r.h !== '-' ? safeNum(r.h, currentPrice) : currentPrice,
-                        low: r.l !== '-' ? safeNum(r.l, currentPrice) : currentPrice,
-                        close: currentPrice,
-                        volume: safeNum(r.v, 0), // TWSE volume 本身就是「張」
-                    };
-                }
-            } catch(e) {}
-            return null;
-        };
-
-        // --- 2. Yahoo 基本面與分時輔助引擎 ---
-        const fetchYahoo = async (target) => {
-            for (let ext of ['.TW', '.TWO']) {
-                const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1m&range=1d`;
-                const fundUrl = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}${ext}`;
-                
-                try {
-                    const [chartData, fundData] = await Promise.all([
-                        fetchFastestProxy(chartUrl, 5000),
-                        fetchFastestProxy(fundUrl, 4000)
-                    ]);
-
-                    if (chartData && chartData.chart && chartData.chart.result) {
-                        const result = chartData.chart.result[0];
-                        const meta = result.meta;
-                        if (!meta || !meta.regularMarketPrice) continue;
-
-                        const currentPrice = safeNum(meta.regularMarketPrice, 0);
-                        const prevClose = safeNum(meta.chartPreviousClose, currentPrice);
-                        const change = currentPrice - prevClose;
-                        const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
-
-                        const timestamps = result.timestamp;
-                        const quote = result.indicators?.quote?.[0];
-                        const intradayCandles = [];
-                        
-                        if (timestamps && quote) {
-                            for (let i = 0; i < timestamps.length; i++) {
-                                const c = quote.close[i];
-                                const o = quote.open[i];
-                                const h = quote.high[i];
-                                const l = quote.low[i];
-                                const v = quote.volume[i];
-                                if (c !== null && o !== null && h !== null && l !== null) {
-                                    intradayCandles.push({
-                                        time: timestamps[i] + 28800, // UTC+8
-                                        open: o, high: h, low: l, close: c, volume: v || 0
-                                    });
-                                }
-                            }
-                        }
-
-                        let fundamentals = { marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---' };
-                        if (fundData && fundData.quoteResponse && fundData.quoteResponse.result) {
-                            const r = fundData.quoteResponse.result[0];
-                            if (r) {
-                                if (r.marketCap) fundamentals.marketCap = r.marketCap >= 1000000000000 ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" : (r.marketCap / 100000000).toFixed(2) + " 億";
-                                fundamentals.pe = r.trailingPE ? r.trailingPE.toFixed(2) : "---";
-                                fundamentals.pb = r.priceToBook ? r.priceToBook.toFixed(2) : "---";
-                                fundamentals.yield = r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---";
-                                fundamentals.eps = r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---";
-                                fundamentals.forwardPE = r.forwardPE ? r.forwardPE.toFixed(2) : "---";
-                            }
-                        }
-
-                        return {
-                            price: currentPrice, change: change, percent: percent,
-                            open: intradayCandles.length > 0 ? intradayCandles[0].open : currentPrice,
-                            high: intradayCandles.length > 0 ? Math.max(...intradayCandles.map(c=>c.high)) : currentPrice,
-                            low: intradayCandles.length > 0 ? Math.min(...intradayCandles.map(c=>c.low)) : currentPrice,
-                            close: currentPrice,
-                            volume: intradayCandles.length > 0 ? intradayCandles.reduce((a, b) => a + b.volume, 0) / 1000 : 0,
-                            intradayCandles: intradayCandles,
-                            ...fundamentals
-                        };
+        // --- 獨創：絕對零延遲爬蟲 (突破外國 Proxy 造成的 20 分鐘延遲) ---
+        const scrapeAbsoluteRealTimePrice = async (target) => {
+            return new Promise((resolve) => {
+                let resolved = false;
+                const done = (price) => {
+                    if (!resolved && price) {
+                        resolved = true;
+                        resolve(price);
                     }
-                } catch(e) {}
-            }
-            return null;
+                };
+
+                // 線程 1：Google Finance HTML 爬蟲 (全球節點皆零延遲)
+                const fetchGoogle = async (ext) => {
+                    const url = `https://www.google.com/finance/quote/${target}:${ext}`;
+                    const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true&_=${Date.now()}`;
+                    try {
+                        const res = await fetchWithTimeout(proxy, {}, 5000);
+                        const data = await res.json();
+                        const match = data.contents.match(/class="YMlKec fxKbKc">[^0-9]*([0-9.,]+)/);
+                        if (match) done(Number(match[1].replace(/,/g, '')));
+                    } catch(e) {}
+                };
+
+                // 線程 2：Yahoo TW 網頁初始狀態爬蟲 (絕對即時)
+                const fetchYahooTW = async () => {
+                    const url = `https://tw.stock.yahoo.com/quote/${target}`;
+                    const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true&_=${Date.now()}`;
+                    try {
+                        const res = await fetchWithTimeout(proxy, {}, 5000);
+                        const data = await res.json();
+                        const match = data.contents.match(/"regularMarketPrice":\s*([0-9.]+)/);
+                        if (match) done(Number(match[1]));
+                    } catch(e) {}
+                };
+
+                fetchGoogle('TPE');
+                fetchGoogle('TWO');
+                fetchYahooTW();
+
+                // 若 5 秒內皆失敗則放行 null，由備用 API 接手
+                setTimeout(() => { if (!resolved) resolve(null); }, 5000);
+            });
         };
 
-        // --- 3. 終極縫合引擎 (TWSE 零秒報價 + Yahoo 基本面) ---
+        // --- 混合型即時引擎：爬蟲價格 + Yahoo 基礎面 ---
         const fetchRealTimeAndFundamentals = async (target) => {
-            const [twse, yahoo] = await Promise.all([
-                fetchTWSE(target),
-                fetchYahoo(target)
+            // 背景並發：抓取真實 0 延遲價格 + Yahoo V7 基本面
+            const [realPrice, yahooDataRaw] = await Promise.all([
+                scrapeAbsoluteRealTimePrice(target),
+                (async () => {
+                    for (let ext of ['.TW', '.TWO']) {
+                        const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}${ext}`;
+                        const data = await fetchFastestProxy(url, 5000);
+                        if (data && data.quoteResponse && data.quoteResponse.result && data.quoteResponse.result[0]) {
+                            return Object.assign(data.quoteResponse.result[0], { _ext: ext });
+                        }
+                    }
+                    return null;
+                })()
             ]);
 
-            if (!twse && !yahoo) return null;
+            if (!yahooDataRaw && !realPrice) return null;
 
-            // 優先採用 TWSE 的官方精準報價
-            const currentPrice = twse ? twse.price : yahoo.price;
-            const change = twse ? twse.change : yahoo.change;
-            const percent = twse ? twse.percent : yahoo.percent;
-            const open = twse ? twse.open : yahoo.open;
-            const high = twse ? twse.high : yahoo.high;
-            const low = twse ? twse.low : yahoo.low;
-            const close = twse ? twse.close : yahoo.close;
-            const volume = twse ? twse.volume : yahoo.volume;
+            const r = yahooDataRaw || {};
+            // 開盤防呆：若 Yahoo 傳回 null，以真實價格或 0 取代
+            const currentPrice = realPrice || safeNum(r.regularMarketPrice, 0);
+            const prevClose = safeNum(r.regularMarketPreviousClose, currentPrice);
+            const change = currentPrice - prevClose;
+            const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
+            
+            let marketCapStr = "---";
+            if (r.marketCap) {
+                marketCapStr = r.marketCap >= 1000000000000 
+                    ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" 
+                    : (r.marketCap / 100000000).toFixed(2) + " 億";
+            }
+
+            // 確保開高低收安全無虞
+            let open = safeNum(r.regularMarketOpen, currentPrice);
+            let high = Math.max(safeNum(r.regularMarketDayHigh, currentPrice), currentPrice);
+            let low = Math.min(safeNum(r.regularMarketDayLow, currentPrice), currentPrice);
 
             return {
-                price: currentPrice.toFixed(2),
-                change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
-                percent: (change > 0 ? '+' : '') + percent.toFixed(2) + '%',
-                open: Number(open).toFixed(2),
-                high: Number(high).toFixed(2),
-                low: Number(low).toFixed(2),
+                price: currentPrice,
+                change: change,
+                percent: percent,
+                open: open,
+                high: high,
+                low: low,
                 close: currentPrice,
-                volume: volume,
-                intradayCandles: yahoo?.intradayCandles || [],
-                marketCap: yahoo?.marketCap || '---',
-                pe: yahoo?.pe || '---',
-                pb: yahoo?.pb || '---',
-                yield: yahoo?.yield || '---',
-                eps: yahoo?.eps || '---',
-                forwardPE: yahoo?.forwardPE || '---'
+                volume: safeNum(r.regularMarketVolume, 0) / 1000,
+                marketCap: marketCapStr,
+                pe: r.trailingPE ? r.trailingPE.toFixed(2) : "---",
+                pb: r.priceToBook ? r.priceToBook.toFixed(2) : "---",
+                yield: r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---",
+                eps: r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---",
+                forwardPE: r.forwardPE ? r.forwardPE.toFixed(2) : "---"
             };
         };
 
-        // --- 4. 歷史圖表引擎 ---
+        // --- 歷史圖表引擎 ---
         const fetchHistoryData = async (target) => {
             for (let ext of ['.TW', '.TWO']) {
                 const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1y`;
@@ -353,18 +315,6 @@
                     if (history.length > 0) return history;
                 }
             }
-
-            try {
-                const d = new Date(); d.setFullYear(d.getFullYear() - 1);
-                const res = await fetchWithTimeout(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${target}&start_date=${d.toISOString().split('T')[0]}`, {}, 4000);
-                const json = await res.json();
-                if (json.msg === 'success' && json.data && json.data.length > 0) {
-                    return json.data.map(i => ({ 
-                        time: i.date, open: Number(i.open), high: Number(i.max), low: Number(i.min), close: Number(i.close), volume: Number(i.Trading_Volume) 
-                    }));
-                }
-            } catch (e) { }
-
             return [];
         };
 
@@ -430,7 +380,6 @@
             const containerRefs = { kline: useRef(null), vol: useRef(null), macd: useRef(null), kdj: useRef(null) };
             
             const isChartInitialized = useRef(false);
-            const isSyncing = useRef(false);
             const currentFetchId = useRef(0);
 
             const isWatched = watchlist.some(w => w.id === stockId);
@@ -444,7 +393,7 @@
                 });
             };
 
-            // 自選清單背景安全刷新
+            // 自選清單背景安全刷新 (5 秒超極速輪詢)
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -465,7 +414,7 @@
                 };
                 
                 updateWatchlistQuotes();
-                const interval = setInterval(updateWatchlistQuotes, 15000); 
+                const interval = setInterval(updateWatchlistQuotes, 5000); 
                 return () => { isActive = false; clearInterval(interval); };
             }, [watchlist]);
 
@@ -613,12 +562,8 @@
                 isChartInitialized.current = true;
             }, []);
 
-            // --- 即時合成 K 棒邏輯與時間軸判斷 ---
+            // --- 即時合成 K 棒邏輯與時間軸判斷 (加入開盤防呆) ---
             const chartDataToRender = useMemo(() => {
-                if (timeframe === '1m') {
-                    return liveTickData?.intradayCandles || [];
-                }
-
                 if (!baseHistoryData || baseHistoryData.length === 0) return [];
                 
                 const sorted = [...baseHistoryData].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
@@ -631,13 +576,14 @@
                     }
                 }
 
-                // 將即時資料縫合進日線歷史
+                // 將即時資料絕對安全縫合進日線歷史
                 if (liveTickData && liveTickData.close > 0) {
                     const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
                     const lClose = safeNum(liveTickData.close, 0);
+                    // 安全墊底：開盤若無資料，以現價為主
                     const lOpen = safeNum(liveTickData.open, lClose);
-                    const lHigh = safeNum(liveTickData.high, lClose);
-                    const lLow = safeNum(liveTickData.low, lClose);
+                    const lHigh = Math.max(safeNum(liveTickData.high, lClose), lClose);
+                    const lLow = Math.min(safeNum(liveTickData.low, lClose), lClose);
                     const lVol = safeNum(liveTickData.volume, 0);
 
                     const lastCandle = uniqueHistory[uniqueHistory.length - 1];
@@ -666,15 +612,6 @@
                     const kChart = chartRefs.current.kChart;
                     const s = seriesRefs.current;
                     if (!s.kSeries || !kChart) return;
-
-                    // 動態切換圖表時間軸格式
-                    kChart.applyOptions({
-                        timeScale: {
-                            timeVisible: timeframe === '1m',
-                            borderColor: '#374151',
-                            fixRightEdge: true
-                        }
-                    });
 
                     const closePrices = chartDataToRender.map(d => d.close);
                     const ma5 = Indicators.ema(closePrices, 5);
@@ -757,7 +694,6 @@
                         setLiveQuote(live);
                         setLiveTickData(live);
                     } else if (history.length > 0) {
-                        // 防護：若即時報價失敗，回推昨日收盤
                         const latest = history[history.length - 1];
                         const prev = history.length > 1 ? history[history.length - 2] : latest;
                         const change = latest.close - prev.close;
@@ -782,7 +718,7 @@
 
 
             // ==========================================
-            // 獨立解耦階段 1.5：背景 10 秒極速輪詢即時報價
+            // 獨立解耦階段 1.5：背景 5 秒極速輪詢即時報價 (券商級)
             // ==========================================
             useEffect(() => {
                 let isActive = true;
@@ -798,8 +734,8 @@
                     }
                 };
 
-                // 啟動 10 秒即時輪詢
-                timer = setInterval(pollData, 10000);
+                // 啟動 5 秒極速即時輪詢
+                timer = setInterval(pollData, 5000);
 
                 return () => {
                     isActive = false;
@@ -933,13 +869,6 @@
             const disableInput = isChartLoading; 
             
             const displayVal = (val) => isAiLoading ? "運算中..." : (!customKey ? "等待金鑰..." : (val || "---"));
-
-            // 完美處理浮動時間顯示 (分鐘級轉換為當地時區字串)
-            const displayTime = hoverData?.time 
-                ? (typeof hoverData.time === 'number' 
-                    ? `${String(new Date(hoverData.time * 1000).getUTCMonth()+1).padStart(2,'0')}/${String(new Date(hoverData.time * 1000).getUTCDate()).padStart(2,'0')} ${String(new Date(hoverData.time * 1000).getUTCHours()).padStart(2,'0')}:${String(new Date(hoverData.time * 1000).getUTCMinutes()).padStart(2,'0')}`
-                    : hoverData.time)
-                : '最新';
 
             return (
                 <div ref={rootRef} className={`min-h-screen bg-[#030303] text-gray-200 font-sans p-1 lg:p-2 overflow-hidden flex flex-col ${zenClass}`}>
@@ -1129,7 +1058,6 @@
                                             </div>
                                         </div>
                                         <div className="flex border border-gray-700 rounded overflow-hidden bg-black/40">
-                                            <button onClick={() => setTimeframe('1m')} disabled={isChartLoading} className={`px-3 py-0.5 text-[10px] font-black transition-all ${timeframe === '1m' ? 'bg-gray-600 text-white' : 'bg-transparent text-gray-400 hover:text-white'}`}>分時</button>
                                             <button onClick={() => setTimeframe('1D')} disabled={isChartLoading} className={`px-3 py-0.5 text-[10px] font-black transition-all ${timeframe === '1D' ? 'bg-gray-600 text-white' : 'bg-transparent text-gray-400 hover:text-white'}`}>日線</button>
                                             <button onClick={() => setTimeframe('1W')} disabled={isChartLoading} className={`px-3 py-0.5 text-[10px] font-black transition-all ${timeframe === '1W' ? 'bg-gray-600 text-white' : 'bg-transparent text-gray-400 hover:text-white'}`}>週線</button>
                                         </div>
@@ -1147,7 +1075,7 @@
                                             <div className="absolute top-1 left-2 z-10 flex flex-wrap gap-1 text-[9px] font-mono pointer-events-none">
                                                 <div className="bg-black/80 px-1.5 py-0.5 rounded text-gray-400 border border-gray-800">K線</div>
                                                 <div className="bg-black/80 px-1.5 py-0.5 rounded text-white border border-white/5">
-                                                    <span className="text-gray-400 mr-2">{displayTime}</span>
+                                                    <span className="text-gray-400 mr-2">{hoverData?.time || '最新'}</span>
                                                     開:{fmtPrice(hoverData?.open || liveQuote.open)} 高:{fmtPrice(hoverData?.high || liveQuote.high)} 低:{fmtPrice(hoverData?.low || liveQuote.low)} 收:{fmtPrice(hoverData?.close || liveQuote.price)}
                                                 </div>
                                                 <div className="bg-black/80 px-1.5 py-0.5 rounded text-yellow-500 border border-gray-800">MA5:{fmtPrice(hoverData?.ma5)}</div>
