@@ -161,16 +161,16 @@
             }
         };
 
-        // --- 獨創：嚴格指紋驗證的代理引擎 (解決假資料陷阱) ---
+        // --- 獨創：大逃殺多線程代理伺服器引擎 (解決連線逾時卡死) ---
         const fetchFastestProxy = async (url, timeoutMs = 6000) => {
             const cb = `_cb=${Date.now()}_${Math.floor(Math.random() * 100000)}`;
             const safeUrl = url.includes('?') ? `${url}&${cb}` : `${url}?${cb}`;
             const encodedUrl = encodeURIComponent(safeUrl);
             
             const proxies = [
+                `https://corsproxy.io/?${encodedUrl}`,
                 `https://api.allorigins.win/raw?url=${encodedUrl}`,
-                `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`,
-                `https://corsproxy.io/?${encodedUrl}`
+                `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`
             ];
 
             try {
@@ -179,12 +179,10 @@
                     if (!res.ok) throw new Error('Bad Proxy Status');
                     const text = await res.text();
                     const json = JSON.parse(text);
-                    
-                    // 【核心防線】：確保回傳的 JSON 是真實的 Yahoo API 結構，而非 Proxy 的報錯網頁
-                    if (!json.chart && !json.quoteResponse) {
-                        throw new Error('Invalid Payload: Not Yahoo Data');
+                    if (json && (json.chart || json.quoteResponse || json.msgArray || json.data)) {
+                        return json; 
                     }
-                    return json; 
+                    throw new Error('Invalid Payload');
                 }));
                 return result;
             } catch (e) {
@@ -192,84 +190,142 @@
             }
         };
 
-        // --- 1. 極速真實數據引擎 (提供 1分K陣列 與 真實基本面，絕不造假) ---
-        const fetchRealTimeAndFundamentals = async (target) => {
-            for (let ext of ['.TW', '.TWO']) {
-                const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1m&range=1d`;
-                const fundUrl = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}${ext}`;
-                
-                // 並發抓取圖表與基礎數據
-                const [chartData, fundData] = await Promise.all([
-                    fetchFastestProxy(chartUrl, 5000),
-                    fetchFastestProxy(fundUrl, 4000)
-                ]);
-
-                if (chartData && chartData.chart && chartData.chart.result) {
-                    const result = chartData.chart.result[0];
-                    const meta = result.meta;
-                    if (!meta || !meta.regularMarketPrice) continue;
-
-                    const currentPrice = safeNum(meta.regularMarketPrice, 0);
-                    const prevClose = safeNum(meta.chartPreviousClose, currentPrice);
+        // --- 1. TWSE 官方零延遲報價直連引擎 ---
+        const fetchTWSE = async (target) => {
+            const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${target}.tw|otc_${target}.tw&json=1&delay=0`;
+            try {
+                const data = await fetchFastestProxy(url, 4000);
+                if (data && data.msgArray && data.msgArray.length > 0) {
+                    const r = data.msgArray[0];
+                    const prevClose = safeNum(r.y, 0);
+                    const currentPrice = r.z !== '-' ? safeNum(r.z, prevClose) : prevClose;
                     const change = currentPrice - prevClose;
                     const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
-
-                    const timestamps = result.timestamp;
-                    const quote = result.indicators?.quote?.[0];
-                    const intradayCandles = [];
-                    
-                    if (timestamps && quote) {
-                        for (let i = 0; i < timestamps.length; i++) {
-                            const c = quote.close[i];
-                            const o = quote.open[i];
-                            const h = quote.high[i];
-                            const l = quote.low[i];
-                            const v = quote.volume[i];
-                            if (c !== null && o !== null && h !== null && l !== null) {
-                                intradayCandles.push({
-                                    time: timestamps[i] + 28800, // 修正時區顯示 (UTC+8)
-                                    open: o,
-                                    high: h,
-                                    low: l,
-                                    close: c,
-                                    volume: v || 0
-                                });
-                            }
-                        }
-                    }
-
-                    // 處理基礎數據
-                    let fundamentals = { marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---' };
-                    if (fundData && fundData.quoteResponse && fundData.quoteResponse.result) {
-                        const r = fundData.quoteResponse.result[0];
-                        if (r) {
-                            if (r.marketCap) fundamentals.marketCap = r.marketCap >= 1000000000000 ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" : (r.marketCap / 100000000).toFixed(2) + " 億";
-                            fundamentals.pe = r.trailingPE ? r.trailingPE.toFixed(2) : "---";
-                            fundamentals.pb = r.priceToBook ? r.priceToBook.toFixed(2) : "---";
-                            fundamentals.yield = r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---";
-                            fundamentals.eps = r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---";
-                            fundamentals.forwardPE = r.forwardPE ? r.forwardPE.toFixed(2) : "---";
-                        }
-                    }
-
                     return {
                         price: currentPrice,
                         change: change,
                         percent: percent,
-                        open: intradayCandles.length > 0 ? intradayCandles[0].open : currentPrice,
-                        high: intradayCandles.length > 0 ? Math.max(...intradayCandles.map(c=>c.high)) : currentPrice,
-                        low: intradayCandles.length > 0 ? Math.min(...intradayCandles.map(c=>c.low)) : currentPrice,
+                        open: r.o !== '-' ? safeNum(r.o, currentPrice) : currentPrice,
+                        high: r.h !== '-' ? safeNum(r.h, currentPrice) : currentPrice,
+                        low: r.l !== '-' ? safeNum(r.l, currentPrice) : currentPrice,
                         close: currentPrice,
-                        volume: intradayCandles.length > 0 ? intradayCandles.reduce((a, b) => a + b.volume, 0) / 1000 : 0,
-                        intradayCandles: intradayCandles,
-                        ...fundamentals
+                        volume: safeNum(r.v, 0), // TWSE volume 本身就是「張」
                     };
                 }
+            } catch(e) {}
+            return null;
+        };
+
+        // --- 2. Yahoo 基本面與分時輔助引擎 ---
+        const fetchYahoo = async (target) => {
+            for (let ext of ['.TW', '.TWO']) {
+                const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1m&range=1d`;
+                const fundUrl = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${target}${ext}`;
+                
+                try {
+                    const [chartData, fundData] = await Promise.all([
+                        fetchFastestProxy(chartUrl, 5000),
+                        fetchFastestProxy(fundUrl, 4000)
+                    ]);
+
+                    if (chartData && chartData.chart && chartData.chart.result) {
+                        const result = chartData.chart.result[0];
+                        const meta = result.meta;
+                        if (!meta || !meta.regularMarketPrice) continue;
+
+                        const currentPrice = safeNum(meta.regularMarketPrice, 0);
+                        const prevClose = safeNum(meta.chartPreviousClose, currentPrice);
+                        const change = currentPrice - prevClose;
+                        const percent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
+
+                        const timestamps = result.timestamp;
+                        const quote = result.indicators?.quote?.[0];
+                        const intradayCandles = [];
+                        
+                        if (timestamps && quote) {
+                            for (let i = 0; i < timestamps.length; i++) {
+                                const c = quote.close[i];
+                                const o = quote.open[i];
+                                const h = quote.high[i];
+                                const l = quote.low[i];
+                                const v = quote.volume[i];
+                                if (c !== null && o !== null && h !== null && l !== null) {
+                                    intradayCandles.push({
+                                        time: timestamps[i] + 28800, // UTC+8
+                                        open: o, high: h, low: l, close: c, volume: v || 0
+                                    });
+                                }
+                            }
+                        }
+
+                        let fundamentals = { marketCap: '---', pe: '---', pb: '---', yield: '---', eps: '---', forwardPE: '---' };
+                        if (fundData && fundData.quoteResponse && fundData.quoteResponse.result) {
+                            const r = fundData.quoteResponse.result[0];
+                            if (r) {
+                                if (r.marketCap) fundamentals.marketCap = r.marketCap >= 1000000000000 ? (r.marketCap / 1000000000000).toFixed(2) + " 兆" : (r.marketCap / 100000000).toFixed(2) + " 億";
+                                fundamentals.pe = r.trailingPE ? r.trailingPE.toFixed(2) : "---";
+                                fundamentals.pb = r.priceToBook ? r.priceToBook.toFixed(2) : "---";
+                                fundamentals.yield = r.trailingAnnualDividendYield ? (r.trailingAnnualDividendYield * 100).toFixed(2) + "%" : "---";
+                                fundamentals.eps = r.epsTrailingTwelveMonths ? r.epsTrailingTwelveMonths.toFixed(2) : "---";
+                                fundamentals.forwardPE = r.forwardPE ? r.forwardPE.toFixed(2) : "---";
+                            }
+                        }
+
+                        return {
+                            price: currentPrice, change: change, percent: percent,
+                            open: intradayCandles.length > 0 ? intradayCandles[0].open : currentPrice,
+                            high: intradayCandles.length > 0 ? Math.max(...intradayCandles.map(c=>c.high)) : currentPrice,
+                            low: intradayCandles.length > 0 ? Math.min(...intradayCandles.map(c=>c.low)) : currentPrice,
+                            close: currentPrice,
+                            volume: intradayCandles.length > 0 ? intradayCandles.reduce((a, b) => a + b.volume, 0) / 1000 : 0,
+                            intradayCandles: intradayCandles,
+                            ...fundamentals
+                        };
+                    }
+                } catch(e) {}
             }
             return null;
         };
 
-        // --- 2. 歷史圖表雙備援引擎 ---
+        // --- 3. 終極縫合引擎 (TWSE 零秒報價 + Yahoo 基本面) ---
+        const fetchRealTimeAndFundamentals = async (target) => {
+            const [twse, yahoo] = await Promise.all([
+                fetchTWSE(target),
+                fetchYahoo(target)
+            ]);
+
+            if (!twse && !yahoo) return null;
+
+            // 優先採用 TWSE 的官方精準報價
+            const currentPrice = twse ? twse.price : yahoo.price;
+            const change = twse ? twse.change : yahoo.change;
+            const percent = twse ? twse.percent : yahoo.percent;
+            const open = twse ? twse.open : yahoo.open;
+            const high = twse ? twse.high : yahoo.high;
+            const low = twse ? twse.low : yahoo.low;
+            const close = twse ? twse.close : yahoo.close;
+            const volume = twse ? twse.volume : yahoo.volume;
+
+            return {
+                price: currentPrice.toFixed(2),
+                change: change > 0 ? '+' + change.toFixed(2) : change.toFixed(2),
+                percent: (change > 0 ? '+' : '') + percent.toFixed(2) + '%',
+                open: Number(open).toFixed(2),
+                high: Number(high).toFixed(2),
+                low: Number(low).toFixed(2),
+                close: currentPrice,
+                volume: volume,
+                intradayCandles: yahoo?.intradayCandles || [],
+                marketCap: yahoo?.marketCap || '---',
+                pe: yahoo?.pe || '---',
+                pb: yahoo?.pb || '---',
+                yield: yahoo?.yield || '---',
+                eps: yahoo?.eps || '---',
+                forwardPE: yahoo?.forwardPE || '---'
+            };
+        };
+
+        // --- 4. 歷史圖表引擎 ---
         const fetchHistoryData = async (target) => {
             for (let ext of ['.TW', '.TWO']) {
                 const url = `https://query1.finance.yahoo.com/v8/finance/chart/${target}${ext}?interval=1d&range=1y`;
@@ -409,7 +465,7 @@
                 };
                 
                 updateWatchlistQuotes();
-                const interval = setInterval(updateWatchlistQuotes, 20000); 
+                const interval = setInterval(updateWatchlistQuotes, 15000); 
                 return () => { isActive = false; clearInterval(interval); };
             }, [watchlist]);
 
@@ -1050,10 +1106,9 @@
                                 <div className="panel-card flex-1 min-h-[120px] border border-gray-800 bg-[#050505]">
                                     <div className="bg-slate-900/40 border-b border-gray-800 p-2 px-3"><span className="text-gray-300 font-bold text-[10px] tracking-widest uppercase">基本面與估值</span></div>
                                     <div className="p-3 space-y-2 text-[10px]">
-                                        <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">總市值</span><span className="text-white font-bold font-mono">{liveQuote.marketCap}</span></div>
+                                        <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">總市值估算</span><span className="text-white font-bold font-mono">{liveQuote.marketCap}</span></div>
                                         <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">殖利率/股淨比</span><span className="text-white font-bold font-mono">{liveQuote.yield} / {liveQuote.pb}</span></div>
-                                        <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">本益比 / 預估 PE</span><span className="text-yellow-400 font-bold font-mono">{liveQuote.pe} / {liveQuote.forwardPE}</span></div>
-                                        <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">近四季 EPS</span><span className="text-white font-bold font-mono">{liveQuote.eps}</span></div>
+                                        <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">預估本益比 (PE)</span><span className="text-yellow-400 font-bold font-mono">{liveQuote.pe}</span></div>
                                         <div className="flex justify-between pb-0.5"><span className="text-gray-500">AI 評價評等</span><span className="text-white font-black">{displayVal(aiData?.valuation?.rating)}</span></div>
                                     </div>
                                 </div>
@@ -1159,7 +1214,7 @@
                                         <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">外資動態</span><span className="text-white font-bold">{displayVal(aiData?.chips?.foreign)}</span></div>
                                         <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">投信動態</span><span className="text-blue-400 font-bold">{displayVal(aiData?.chips?.trust)}</span></div>
                                         <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">主力持股</span><span className="text-white font-black font-mono">{displayVal(aiData?.chips?.big)}</span></div>
-                                        <div className="flex justify-between border-b border-gray-800 border-dotted pb-1"><span className="text-gray-500">散戶持股</span><span className="text-white font-bold font-mono">{displayVal(aiData?.chips?.retail)}</span></div>
+                                        <div className="flex justify-between pb-0.5"><span className="text-gray-500">散戶持股</span><span className="text-white font-bold font-mono">{displayVal(aiData?.chips?.retail)}</span></div>
                                     </div>
                                 </div>
 
