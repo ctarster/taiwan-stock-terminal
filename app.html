@@ -177,71 +177,57 @@
             } catch (e) { clearTimeout(tid); throw new Error('Timeout'); }
         };
 
-        const fetchTWSELive = async (id) => {
-            // 優先嘗試 TWSE 即時 API
-            const twseUrl = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${id}.tw|otc_${id}.tw&json=1&delay=0`;
-            try {
-                const res = await fetchWithTimeout(`https://api.allorigins.win/raw?url=${encodeURIComponent(twseUrl)}`, {}, 3000);
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data?.msgArray?.length > 0) {
-                        const r = data.msgArray[0];
-                        const prevClose = safeNum(r.y);
-                        const price = r.z !== '-' ? safeNum(r.z, prevClose) : prevClose;
-                        const change = price - prevClose;
-                        return { price, change, percent: prevClose ? (change / prevClose) * 100 : 0, open: r.o !== '-' ? safeNum(r.o, price) : price, high: r.h !== '-' ? safeNum(r.h, price) : price, low:  r.l !== '-' ? safeNum(r.l, price) : price, volume: safeNum(r.v), name: r.n || STOCK_NAMES[id] || id, status: 'live' };
-                    }
-                }
-            } catch (e) {}
-
-            // 備援：嘗試 Yahoo Finance API (解決 Proxy 被擋導致自選清單與報價為 --- 的問題)
-            try {
-                const yUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${id}.TW?interval=1d&range=1d`;
-                const yRes = await fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(yUrl)}`, {}, 3000);
-                if (yRes.ok) {
-                    const yData = await yRes.json();
-                    if (yData?.chart?.result?.[0]) {
-                        const meta = yData.chart.result[0].meta;
-                        const price = safeNum(meta.regularMarketPrice);
-                        const prevClose = safeNum(meta.chartPreviousClose);
-                        const change = price - prevClose;
-                        return { price, change, percent: prevClose ? (change / prevClose) * 100 : 0, open: safeNum(meta.regularMarketOpen, price), high: safeNum(meta.regularMarketDayHigh, price), low: safeNum(meta.regularMarketDayLow, price), volume: safeNum(meta.regularMarketVolume) / 1000, name: STOCK_NAMES[id] || id, status: 'live' };
-                    }
-                }
-            } catch (e) {}
-
-            return { name: STOCK_NAMES[id] || id, status: 'error' };
-        };
-
-        const fetchHistory = async (id) => {
+        // 徹底放棄不穩定的 Proxy 與 TWSE/Yahoo，統一使用 FinMind 官方 API
+        const fetchStockData = async (id) => {
             const start = new Date();
             start.setFullYear(start.getFullYear() - 1);
             const ds = `${start.getFullYear()}-${String(start.getMonth()+1).padStart(2,'0')}-${String(start.getDate()).padStart(2,'0')}`;
             try {
+                // 直接呼叫 FinMind (支援 CORS)
                 const res = await fetchWithTimeout(
                     `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${id}&start_date=${ds}`,
-                    {}, 7000
+                    {}, 8000
                 );
                 const json = await res.json();
                 if (json.msg === 'success' && json.data?.length > 0) {
-                    return json.data.map(d => ({
+                    const rows = json.data.map(d => ({
                         time:   d.date,
                         open:   safeNum(d.open),
                         high:   safeNum(d.max),
                         low:    safeNum(d.min),
                         close:  safeNum(d.close),
-                        volume: safeNum(d.Trading_Volume) / 1000
+                        volume: safeNum(d.Trading_Volume) / 1000 // 轉張數
                     }));
+                    
+                    if(rows.length > 0) {
+                         const last = rows[rows.length - 1];
+                         const prevLast = rows.length > 1 ? rows[rows.length - 2] : last;
+                         const change = last.close - prevLast.close;
+                         const percent = prevLast.close ? (change / prevLast.close) * 100 : 0;
+                         
+                         const quote = {
+                             name: STOCK_NAMES[id] || id,
+                             price: last.close,
+                             change: change,
+                             percent: percent,
+                             open: last.open,
+                             high: last.high,
+                             low: last.low,
+                             volume: last.volume,
+                             status: 'live' 
+                         };
+                         return { rows, quote };
+                    }
                 }
             } catch (e) { console.warn('FinMind failed', e); }
-            return [];
+            return { rows: [], quote: emptyQuote(id, 'error') };
         };
 
-        const emptyQuote = (id) => ({
+        const emptyQuote = (id, status='loading') => ({
             name: STOCK_NAMES[id] || id,
             price: null, change: null, percent: null,
             open: null, high: null, low: null, volume: null,
-            status: 'loading'
+            status: status
         });
 
         const App = () => {
@@ -290,6 +276,7 @@
                 });
             };
 
+            // 自選清單輪詢：改用穩定的 FinMind 歷史資料推算現價
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -297,16 +284,17 @@
                     for (const item of watchlist) {
                         if (!isActive) break;
                         try {
-                            const rtData = await fetchTWSELive(item.id);
-                            if (rtData && rtData.price !== null) {
-                                setWatchlistQuotes(prev => ({ ...prev, [item.id]: { price: rtData.price, change: rtData.change, percent: rtData.percent } }));
+                            const result = await fetchStockData(item.id);
+                            if (result.quote && result.quote.price !== null) {
+                                setWatchlistQuotes(prev => ({ ...prev, [item.id]: { price: result.quote.price, change: result.quote.change, percent: result.quote.percent } }));
                             }
                         } catch(e){}
-                        await new Promise(r => setTimeout(r, 200)); 
+                        // 加入延遲，避免瞬間發出大量請求被 FinMind 封鎖 (Rate Limit)
+                        await new Promise(r => setTimeout(r, 500)); 
                     }
                 };
                 updateWatchlistQuotes();
-                const interval = setInterval(updateWatchlistQuotes, 30000); // 降低輪詢頻率至30秒，避免被 Proxy 封鎖
+                const interval = setInterval(updateWatchlistQuotes, 30000); // 降低頻率到30秒
                 return () => { isActive = false; clearInterval(interval); };
             }, [watchlist]);
 
@@ -367,34 +355,11 @@
 
             const chartData = useMemo(() => {
                 if (!history.length) return [];
+                // 去重，確保時間序列唯一，避免圖表崩潰
                 const dataMap = new Map();
                 history.forEach(d => dataMap.set(d.time, d));
-
-                if (liveQuote.price) {
-                    const now = new Date();
-                    const twUtc = now.getTime() + (now.getTimezoneOffset() * 60000) + (8 * 3600000);
-                    const twDate = new Date(twUtc);
-                    const today = `${twDate.getFullYear()}-${String(twDate.getMonth()+1).padStart(2,'0')}-${String(twDate.getDate()).padStart(2,'0')}`;
-                    
-                    if (dataMap.has(today)) {
-                        const last = dataMap.get(today);
-                        last.close  = liveQuote.price;
-                        last.high   = Math.max(last.high, liveQuote.price);
-                        last.low    = liveQuote.low ? Math.min(last.low, liveQuote.low) : last.low;
-                        last.volume = Math.max(last.volume, liveQuote.volume || 0);
-                    } else {
-                        dataMap.set(today, {
-                            time: today,
-                            open:   liveQuote.open  || liveQuote.price,
-                            high:   liveQuote.high  || liveQuote.price,
-                            low:    liveQuote.low   || liveQuote.price,
-                            close:  liveQuote.price,
-                            volume: liveQuote.volume || 0
-                        });
-                    }
-                }
                 return Array.from(dataMap.values()).sort((a, b) => a.time.localeCompare(b.time));
-            }, [history, liveQuote]);
+            }, [history]);
 
             useEffect(() => {
                 if (!chartData.length) return;
@@ -434,6 +399,7 @@
                 };
                 setTechFeatures(newFeatures);
 
+                // 計算純數學預測模型
                 if (liveQuote.price && latest.atr) {
                      const prediction = MathPredictor.forecast(chartData, Number(liveQuote.price), latest.atr);
                      setMathPrediction(prediction);
@@ -457,10 +423,12 @@
                 });
             }, [chartData, initCharts]);
 
+            // 強制狀態同步：確保切換股票時，舊資料不殘留
             useEffect(() => {
                 const gen = ++fetchGen.current;
 
                 setLiveQuote(emptyQuote(stockId));
+                setCurrentName(STOCK_NAMES[stockId] || stockId);
                 setHistory([]);
                 setAiData(null);
                 setTechFeatures(null);
@@ -469,66 +437,21 @@
                 destroyCharts();
                 setIsChartLoading(true);
 
-                let isTwseDone = false;
-
-                fetchTWSELive(stockId).then(q => {
+                // 單一入口，抓取 FinMind 資料
+                fetchStockData(stockId).then(result => {
                     if (fetchGen.current !== gen) return;
-                    isTwseDone = true;
-                    if (q && q.price !== null) {
-                        if (q.name) setCurrentName(q.name);
-                        
-                        // 確保漲跌幅計算正確
-                        let finalChange = q.change;
-                        let finalPercent = q.percent;
-                        
-                        if (q.change === null || isNaN(q.change) || q.price === 0) {
-                             finalChange = 0;
-                             finalPercent = 0;
-                        }
-                        
-                        const updatedQuote = { 
-                            ...q, 
-                            change: finalChange,
-                            percent: finalPercent,
-                            status: 'live' 
-                        };
-                        
-                        setLiveQuote(prev => ({ ...prev, ...updatedQuote }));
-                    }
-                });
-
-                fetchHistory(stockId).then(rows => {
-                    if (fetchGen.current !== gen) return;
-                    if (rows.length > 0) {
-                        setHistory(rows);
-                        if (!isTwseDone) {
-                            const last = rows[rows.length - 1];
-                            const prevLast = rows.length > 1 ? rows[rows.length - 2] : last;
-                            
-                            // 歷史資料備援計算
-                            const fallbackPrice = last.close;
-                            const fallbackPrevClose = prevLast.close;
-                            const fallbackChange = fallbackPrice - fallbackPrevClose;
-                            const fallbackPercent = fallbackPrevClose ? (fallbackChange / fallbackPrevClose) * 100 : 0;
-                            
-                            setLiveQuote(prev => {
-                                if (prev.price === null || prev.status === 'error') {
-                                    return { 
-                                        ...prev, 
-                                        price: fallbackPrice, open: last.open, high: last.high, low: last.low, volume: last.volume,
-                                        change: fallbackChange, percent: fallbackPercent, status: 'fallback' 
-                                    };
-                                }
-                                return prev;
-                            });
-                        }
+                    
+                    if (result.rows.length > 0) {
+                        setHistory(result.rows);
+                        setLiveQuote(result.quote);
+                        setCurrentName(result.quote.name);
                     } else {
                         setStatusMsg('歷史資料載入失敗，圖表無法顯示');
                     }
                     setIsChartLoading(false);
                 }).catch(() => {
                     if (fetchGen.current !== gen) return;
-                    setStatusMsg('歷史資料載入失敗');
+                    setStatusMsg('資料載入失敗');
                     setIsChartLoading(false);
                 });
 
@@ -624,6 +547,8 @@
 
             return (
                 <div className="min-h-screen bg-[#030303] text-gray-200 font-sans p-1 lg:p-2 flex flex-col" style={{ height: '100vh' }}>
+                    
+                    {/* Header: 水平排版，徹底解決重疊問題 */}
                     <header className="flex-none flex justify-between items-center mb-1 lg:mb-2 bg-[#0a0a0a] header-padding border border-gray-800 rounded shadow-xl animate-slide-in">
                         <div className="flex items-center gap-3">
                             <h1 className="responsive-text-lg font-bold text-white tracking-tighter">
@@ -632,30 +557,21 @@
                             </h1>
                             <div className="h-5 w-px bg-gray-700"></div>
                             
-                            <div className="flex items-baseline gap-3">
-                                <div className="flex items-center gap-2">
-                                    <span className={`text-3xl lg:text-4xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'} value-update`} key={liveQuote.price}>
-                                        {liveQuote.price ? fmtPrice(liveQuote.price) : '---'}
-                                    </span>
-                                    {liveQuote.status === 'fallback' && (
-                                        <span className="flex h-2 w-2 relative" title="即時資料延遲，目前使用昨日收盤價備援">
-                                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span>
-                                          <span className="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>
-                                        </span>
-                                    )}
-                                </div>
-
-                                {/* 終極排版修復：改為水平並排排列，徹底消滅垂直重疊破版的可能 */}
-                                <div className={`flex gap-2 text-sm lg:text-base font-bold font-mono ${isUp ? 'text-red-500' : 'text-green-500'}`}>
-                                    <span className="value-update" key={liveQuote.change}>{fmtChange(liveQuote.change)}</span>
-                                    <span className="value-update" key={liveQuote.percent}>({fmtPct(liveQuote.percent)})</span>
+                            {/* 價格與漲跌幅水平並列 */}
+                            <div className="flex items-center gap-3">
+                                <span className={`text-2xl lg:text-3xl font-black font-mono value-update ${isUp ? 'text-red-500' : 'text-green-500'}`} key={liveQuote.price}>
+                                    {liveQuote.price ? fmtPrice(liveQuote.price) : '---'}
+                                </span>
+                                <div className={`flex items-center gap-2 responsive-text-sm font-bold font-mono value-update ${isUp ? 'text-red-500' : 'text-green-500'}`} key={liveQuote.change}>
+                                    <span>{fmtChange(liveQuote.change)}</span>
+                                    <span>({fmtPct(liveQuote.percent)})</span>
                                 </div>
                             </div>
                         </div>
                         <div className="flex gap-2 items-center">
                             {isChartLoading && <span className="responsive-text-sm text-gray-500 animate-pulse hidden sm:inline">資料載入中…</span>}
                             <button onClick={toggleWatchlist} className={`px-2 py-1 responsive-text-sm font-bold rounded transition-colors border hidden sm:block ${isWatched ? 'bg-yellow-900/40 border-yellow-700 text-yellow-300' : 'bg-gray-800 border-gray-600 text-gray-400 hover:bg-gray-700 hover:text-white'}`}>
-                                {isWatched ? '加入追蹤' : '取消追蹤'}
+                                {isWatched ? '取消追蹤' : '加入追蹤'}
                             </button>
                             <input
                                 type="text" value={inputValue}
@@ -686,8 +602,10 @@
                     )}
 
                     <main className="flex-1 grid grid-cols-12 gap-1 lg:gap-2 overflow-hidden min-h-0 animate-fade-in">
+                        {/* 左側面板 */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-1 lg:gap-2 overflow-y-auto custom-scrollbar pr-1 min-h-0">
                             
+                            {/* 階段二：前端純數學預測引擎 */}
                             <div className="panel-card predict-panel panel-padding bg-blue-950/10 flex flex-col gap-2 relative overflow-hidden">
                                 <div className="flex justify-between items-center border-b border-blue-900/50 pb-1">
                                     <span className="text-blue-400 font-bold responsive-text-sm tracking-widest">JS 統計波動率模型</span>
@@ -735,6 +653,7 @@
                                 )}
                             </div>
 
+                            {/* 今日交易明細 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-gray-900/40 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-gray-300 font-bold text-[10px] tracking-widest uppercase">今日交易明細</span>
@@ -747,6 +666,7 @@
                                 </div>
                             </div>
 
+                            {/* 籌碼與多空 */}
                             <div className="panel-card chips-panel bg-[#050505] flex-none">
                                 <div className="bg-yellow-950/20 border-b border-yellow-900/30 p-1.5 px-2 flex justify-between items-center">
                                     <span className="text-yellow-500 font-bold text-[10px] lg:text-xs tracking-widest uppercase">籌碼與多空 (AI 推估)</span>
@@ -767,6 +687,7 @@
                                 </div>
                             </div>
 
+                            {/* 技術特徵 */}
                             <div className="panel-card bg-[#050505]">
                                 <div className="bg-blue-950/20 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-blue-400 font-bold text-[10px] tracking-widest uppercase">技術特徵 (Tech Features)</span>
@@ -786,6 +707,7 @@
                                 </div>
                             </div>
 
+                            {/* 基本面估值 */}
                             <div className="panel-card bg-[#050505] flex-1">
                                 <div className="bg-slate-900/40 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-gray-300 font-bold text-[10px] tracking-widest uppercase">基本面與估值 (AI 估算)</span>
@@ -802,6 +724,7 @@
                             </div>
                         </div>
 
+                        {/* 中間圖表區 */}
                         <div className="col-span-12 lg:col-span-6 flex flex-col border border-gray-800 bg-[#050505] rounded overflow-hidden min-h-[300px] lg:min-h-0">
                             <div className="bg-gray-900/50 p-1.5 flex flex-wrap gap-2 lg:gap-3 text-[9px] lg:text-[10px] font-mono border-b border-gray-800 text-gray-400 flex-none">
                                 <span>開:<span className="text-gray-200">{fmtPrice(hoverData?.open)}</span></span>
@@ -818,8 +741,10 @@
                             </div>
                         </div>
 
+                        {/* 右側面板 */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-1 lg:gap-2 overflow-y-auto custom-scrollbar pl-1 min-h-0">
                             
+                            {/* 總體聯動 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-cyan-950/20 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-cyan-400 font-bold text-[10px] uppercase">總體聯動 (AI 判讀)</span>
@@ -834,6 +759,7 @@
                                 </div>
                             </div>
 
+                            {/* 自選清單 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-[#1a1500] border-b border-gray-800 p-1.5 px-2 flex justify-between items-center cursor-pointer hover:bg-[#2a2200] transition-colors" onClick={() => setIsWatchlistExpanded(!isWatchlistExpanded)}>
                                     <span className="text-yellow-500 font-bold text-[10px] lg:text-xs tracking-widest uppercase">自選追蹤清單</span>
@@ -861,6 +787,7 @@
                                 </div>
                             </div>
 
+                            {/* 戰略矩陣 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-orange-950/20 border-b border-gray-800 p-1.5 px-2 flex justify-between items-center">
                                     <span className="text-orange-400 font-bold text-[10px] uppercase">AI 戰略矩陣</span>
@@ -875,6 +802,7 @@
                                 </div>
                             </div>
 
+                            {/* 健檢分析 */}
                             <div className="panel-card bg-[#050505] flex-none border border-green-900/30">
                                 <div className="bg-green-950/20 border-b border-gray-800 p-1.5 px-2 flex justify-between items-center">
                                     <span className="text-green-400 font-bold text-[10px] uppercase">AI 健檢分析</span>
@@ -893,6 +821,7 @@
                                 </div>
                             </div>
 
+                            {/* 成交深度 */}
                             <div className="panel-card bg-[#050505] flex-none border border-purple-900/30">
                                 <div className="bg-purple-950/20 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-purple-400 font-bold text-[10px] uppercase">AI 成交深度解析</span>
@@ -906,6 +835,7 @@
                                 </div>
                             </div>
 
+                            {/* 開盤分析 */}
                             <div className="panel-card bg-[#050505] flex-1 flex flex-col">
                                 <div className="bg-blue-950/20 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-blue-400 font-bold text-[10px] uppercase">AI 盤前開盤分析</span>
@@ -918,6 +848,7 @@
                                     )}
                                 </div>
                             </div>
+
                         </div>
                     </main>
                 </div>
