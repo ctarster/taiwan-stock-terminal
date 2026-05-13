@@ -634,6 +634,7 @@
                                 )}
                             </div>
 
+                            {/* 修復重疊破版：確保固定高度並使用 flex-col 時，內部元素有明確的行高與唯一 Key */}
                             <div className={`flex flex-col responsive-text-sm font-bold font-mono ${isUp ? 'text-red-500' : 'text-green-500'} overflow-hidden h-8 justify-center`}>
                                 <span className="value-update leading-tight" key={liveQuote.change}>{fmtChange(liveQuote.change)}</span>
                                 <span className="value-update leading-tight" key={liveQuote.percent}>{fmtPct(liveQuote.percent)}</span>
