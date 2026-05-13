@@ -177,44 +177,19 @@
             } catch (e) { clearTimeout(tid); throw new Error('Timeout'); }
         };
 
-        const fetchTWSELive = async (id) => {
-            const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${id}.tw|otc_${id}.tw&json=1&delay=0`;
-            try {
-                const res = await fetchWithTimeout(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, {}, 4000);
-                if (!res.ok) throw new Error('Proxy HTTP Error');
-                const data = await res.json();
-                if (data?.msgArray?.length > 0) {
-                    const r = data.msgArray[0];
-                    const prevClose = safeNum(r.y);
-                    const price = r.z !== '-' ? safeNum(r.z, prevClose) : prevClose;
-                    const change = price - prevClose;
-                    return {
-                        price, change,
-                        percent: prevClose ? (change / prevClose) * 100 : 0,
-                        open: r.o !== '-' ? safeNum(r.o, price) : price,
-                        high: r.h !== '-' ? safeNum(r.h, price) : price,
-                        low:  r.l !== '-' ? safeNum(r.l, price) : price,
-                        volume: safeNum(r.v),
-                        name: r.n || STOCK_NAMES[id] || id,
-                        status: 'live' 
-                    };
-                }
-            } catch {}
-            return { name: STOCK_NAMES[id] || id, status: 'error' };
-        };
-
-        const fetchHistory = async (id) => {
+        // 徹底放棄 TWSE 即時 API，統一使用 FinMind 獲取歷史與最新一筆資料，確保穩定與一致性
+        const fetchStockData = async (id) => {
             const start = new Date();
             start.setFullYear(start.getFullYear() - 1);
             const ds = `${start.getFullYear()}-${String(start.getMonth()+1).padStart(2,'0')}-${String(start.getDate()).padStart(2,'0')}`;
             try {
                 const res = await fetchWithTimeout(
                     `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${id}&start_date=${ds}`,
-                    {}, 7000
+                    {}, 8000
                 );
                 const json = await res.json();
                 if (json.msg === 'success' && json.data?.length > 0) {
-                    return json.data.map(d => ({
+                    const rows = json.data.map(d => ({
                         time:   d.date,
                         open:   safeNum(d.open),
                         high:   safeNum(d.max),
@@ -222,16 +197,36 @@
                         close:  safeNum(d.close),
                         volume: safeNum(d.Trading_Volume) / 1000
                     }));
+                    
+                    if(rows.length > 0) {
+                         const last = rows[rows.length - 1];
+                         const prevLast = rows.length > 1 ? rows[rows.length - 2] : last;
+                         const change = last.close - prevLast.close;
+                         const percent = prevLast.close ? (change / prevLast.close) * 100 : 0;
+                         
+                         const quote = {
+                             name: STOCK_NAMES[id] || id,
+                             price: last.close,
+                             change: change,
+                             percent: percent,
+                             open: last.open,
+                             high: last.high,
+                             low: last.low,
+                             volume: last.volume,
+                             status: 'live' 
+                         };
+                         return { rows, quote };
+                    }
                 }
             } catch (e) { console.warn('FinMind failed', e); }
-            return [];
+            return { rows: [], quote: emptyQuote(id, 'error') };
         };
 
-        const emptyQuote = (id) => ({
+        const emptyQuote = (id, status='loading') => ({
             name: STOCK_NAMES[id] || id,
             price: null, change: null, percent: null,
             open: null, high: null, low: null, volume: null,
-            status: 'loading'
+            status: status
         });
 
         const App = () => {
@@ -280,6 +275,7 @@
                 });
             };
 
+            // 自選清單輪詢：改用穩定的 FinMind 歷史資料推算現價
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -287,16 +283,16 @@
                     for (const item of watchlist) {
                         if (!isActive) break;
                         try {
-                            const rtData = await fetchTWSELive(item.id);
-                            if (rtData && rtData.price !== null) {
-                                setWatchlistQuotes(prev => ({ ...prev, [item.id]: { price: rtData.price, change: rtData.change, percent: rtData.percent } }));
+                            const result = await fetchStockData(item.id);
+                            if (result.quote && result.quote.price !== null) {
+                                setWatchlistQuotes(prev => ({ ...prev, [item.id]: { price: result.quote.price, change: result.quote.change, percent: result.quote.percent } }));
                             }
                         } catch(e){}
-                        await new Promise(r => setTimeout(r, 200)); 
+                        await new Promise(r => setTimeout(r, 300)); 
                     }
                 };
                 updateWatchlistQuotes();
-                const interval = setInterval(updateWatchlistQuotes, 10000); 
+                const interval = setInterval(updateWatchlistQuotes, 30000); // 降低頻率避免被封鎖
                 return () => { isActive = false; clearInterval(interval); };
             }, [watchlist]);
 
@@ -360,31 +356,9 @@
                 const dataMap = new Map();
                 history.forEach(d => dataMap.set(d.time, d));
 
-                if (liveQuote.price) {
-                    const now = new Date();
-                    const twUtc = now.getTime() + (now.getTimezoneOffset() * 60000) + (8 * 3600000);
-                    const twDate = new Date(twUtc);
-                    const today = `${twDate.getFullYear()}-${String(twDate.getMonth()+1).padStart(2,'0')}-${String(twDate.getDate()).padStart(2,'0')}`;
-                    
-                    if (dataMap.has(today)) {
-                        const last = dataMap.get(today);
-                        last.close  = liveQuote.price;
-                        last.high   = Math.max(last.high, liveQuote.price);
-                        last.low    = liveQuote.low ? Math.min(last.low, liveQuote.low) : last.low;
-                        last.volume = Math.max(last.volume, liveQuote.volume || 0);
-                    } else {
-                        dataMap.set(today, {
-                            time: today,
-                            open:   liveQuote.open  || liveQuote.price,
-                            high:   liveQuote.high  || liveQuote.price,
-                            low:    liveQuote.low   || liveQuote.price,
-                            close:  liveQuote.price,
-                            volume: liveQuote.volume || 0
-                        });
-                    }
-                }
+                // 移除強制寫入今天時間的邏輯，完全依賴 FinMind 的歷史資料，避免產生未來 K 棒
                 return Array.from(dataMap.values()).sort((a, b) => a.time.localeCompare(b.time));
-            }, [history, liveQuote]);
+            }, [history]);
 
             useEffect(() => {
                 if (!chartData.length) return;
@@ -447,10 +421,12 @@
                 });
             }, [chartData, initCharts]);
 
+            // 強制狀態同步：確保切換股票時，舊資料不殘留
             useEffect(() => {
                 const gen = ++fetchGen.current;
 
                 setLiveQuote(emptyQuote(stockId));
+                setCurrentName(STOCK_NAMES[stockId] || stockId);
                 setHistory([]);
                 setAiData(null);
                 setTechFeatures(null);
@@ -459,66 +435,20 @@
                 destroyCharts();
                 setIsChartLoading(true);
 
-                let isTwseDone = false;
-
-                fetchTWSELive(stockId).then(q => {
+                fetchStockData(stockId).then(result => {
                     if (fetchGen.current !== gen) return;
-                    isTwseDone = true;
-                    if (q && q.price !== null) {
-                        if (q.name) setCurrentName(q.name);
-                        
-                        // 確保漲跌幅計算正確
-                        let finalChange = q.change;
-                        let finalPercent = q.percent;
-                        
-                        if (q.change === null || isNaN(q.change) || q.price === 0) {
-                             finalChange = 0;
-                             finalPercent = 0;
-                        }
-                        
-                        const updatedQuote = { 
-                            ...q, 
-                            change: finalChange,
-                            percent: finalPercent,
-                            status: 'live' 
-                        };
-                        
-                        setLiveQuote(prev => ({ ...prev, ...updatedQuote }));
-                    }
-                });
-
-                fetchHistory(stockId).then(rows => {
-                    if (fetchGen.current !== gen) return;
-                    if (rows.length > 0) {
-                        setHistory(rows);
-                        if (!isTwseDone) {
-                            const last = rows[rows.length - 1];
-                            const prevLast = rows.length > 1 ? rows[rows.length - 2] : last;
-                            
-                            // 歷史資料備援計算
-                            const fallbackPrice = last.close;
-                            const fallbackPrevClose = prevLast.close;
-                            const fallbackChange = fallbackPrice - fallbackPrevClose;
-                            const fallbackPercent = fallbackPrevClose ? (fallbackChange / fallbackPrevClose) * 100 : 0;
-                            
-                            setLiveQuote(prev => {
-                                if (prev.price === null || prev.status === 'error') {
-                                    return { 
-                                        ...prev, 
-                                        price: fallbackPrice, open: last.open, high: last.high, low: last.low, volume: last.volume,
-                                        change: fallbackChange, percent: fallbackPercent, status: 'fallback' 
-                                    };
-                                }
-                                return prev;
-                            });
-                        }
+                    
+                    if (result.rows.length > 0) {
+                        setHistory(result.rows);
+                        setLiveQuote(result.quote);
+                        setCurrentName(result.quote.name);
                     } else {
                         setStatusMsg('歷史資料載入失敗，圖表無法顯示');
                     }
                     setIsChartLoading(false);
                 }).catch(() => {
                     if (fetchGen.current !== gen) return;
-                    setStatusMsg('歷史資料載入失敗');
+                    setStatusMsg('資料載入失敗');
                     setIsChartLoading(false);
                 });
 
@@ -626,15 +556,8 @@
                                 <span className={`text-2xl lg:text-3xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'} value-update flex gap-1 h-8 items-center overflow-hidden`} key={liveQuote.price}>
                                     {liveQuote.price ? fmtPrice(liveQuote.price) : '---'}
                                 </span>
-                                {liveQuote.status === 'fallback' && (
-                                    <span className="flex h-2 w-2 relative" title="即時資料延遲，目前使用昨日收盤價備援">
-                                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span>
-                                      <span className="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>
-                                    </span>
-                                )}
                             </div>
 
-                            {/* 修復重疊破版：確保固定高度並使用 flex-col 時，內部元素有明確的行高與唯一 Key */}
                             <div className={`flex flex-col responsive-text-sm font-bold font-mono ${isUp ? 'text-red-500' : 'text-green-500'} overflow-hidden h-8 justify-center`}>
                                 <span className="value-update leading-tight" key={liveQuote.change}>{fmtChange(liveQuote.change)}</span>
                                 <span className="value-update leading-tight" key={liveQuote.percent}>{fmtPct(liveQuote.percent)}</span>
