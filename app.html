@@ -554,8 +554,9 @@
 3. 根據公司現況與大盤動態，推估「基本面與總體經濟 (market)」，必須填寫所有空缺數值(如市值、本益比、大盤狀態等)，嚴禁留空。
 4. 推估籌碼動向 (chips)：主力、機構、散戶動態，並給出 0~100 的多空指標 (bull_bear_index，>50偏多)。
 5. 設定第一停利目標價 (TP1) 與嚴格停損價 (SL)（必須是數字）。
-6. 只能輸出純 JSON，嚴禁任何 markdown 標記。
-格式：{"prediction":{"open":"","close":"","open_analysis":"","prob":{"up":0,"flat":0,"down":0},"targets":{"tp1":"","sl":""}},"market":{"taiex":"","sox":"","marketCap":"","pe":""},"chips":{"big_player":"","institution":"","retail":"","bull_bear_index":0},"strategy":{"score":0,"conclusion":""}}`;
+6. 生成健檢分析 (health_check): 提供1-100分的綜合健康分數，以及一句簡短有力的體質點評。
+7. 只能輸出純 JSON，嚴禁任何 markdown 標記。
+格式：{"prediction":{"open":"","close":"","open_analysis":"","prob":{"up":0,"flat":0,"down":0},"targets":{"tp1":"","sl":""}},"market":{"taiex":"","sox":"","marketCap":"","pe":""},"chips":{"big_player":"","institution":"","retail":"","bull_bear_index":0},"strategy":{"score":0,"conclusion":""},"health_check":{"score":0,"comment":""}}`;
 
                         const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
                             method: 'POST',
@@ -802,6 +803,18 @@
 
                         {/* 右側面板 (戰略與清單) */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-1 lg:gap-2 overflow-y-auto custom-scrollbar pl-1 min-h-0">
+                            
+                            {/* 總體聯動 (移到最上方) */}
+                            <div className="panel-card bg-[#050505] flex-none">
+                                <div className="bg-cyan-950/20 border-b border-gray-800 p-1.5 px-2">
+                                    <span className="text-cyan-400 font-bold text-[10px] uppercase">總體聯動</span>
+                                </div>
+                                <div className="p-2 text-[10px] lg:text-xs space-y-1 font-mono">
+                                    <div className="flex justify-between border-b border-gray-800 pb-0.5"><span className="text-gray-500">大盤狀態 (加權)</span><span className="text-white truncate max-w-[120px] text-right">{aiData?.market?.taiex || '---'}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-500">費半狀態 (SOX)</span><span className="text-white truncate max-w-[120px] text-right">{aiData?.market?.sox || '---'}</span></div>
+                                </div>
+                            </div>
+
                             {/* 追蹤清單 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-[#1a1500] border-b border-gray-800 p-1.5 px-2 flex justify-between items-center cursor-pointer hover:bg-[#2a2200] transition-colors" onClick={() => setIsWatchlistExpanded(!isWatchlistExpanded)}>
@@ -831,6 +844,7 @@
                                 </div>
                             </div>
 
+                            {/* AI 戰略矩陣 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-orange-950/20 border-b border-gray-800 p-1.5 px-2 flex justify-between items-center">
                                     <span className="text-orange-400 font-bold text-[10px] uppercase">AI 戰略矩陣</span>
@@ -843,22 +857,28 @@
                                 </div>
                             </div>
 
+                            {/* AI 健檢分析 (新增) */}
+                            <div className="panel-card bg-[#050505] flex-none border border-green-900/30">
+                                <div className="bg-green-950/20 border-b border-gray-800 p-1.5 px-2 flex justify-between items-center">
+                                    <span className="text-green-400 font-bold text-[10px] uppercase">AI 健檢分析</span>
+                                    {aiData?.health_check?.score != null && (
+                                        <div className={`px-1.5 py-0.5 rounded text-[10px] font-black ${aiData.health_check.score >= 70 ? 'bg-green-900/50 text-green-400' : aiData.health_check.score >= 40 ? 'bg-yellow-900/50 text-yellow-400' : 'bg-red-900/50 text-red-400'}`}>
+                                            體質: {aiData.health_check.score}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="p-2 text-[10px] lg:text-xs text-gray-300 leading-relaxed italic">
+                                    {isAiLoading ? <span className="text-gray-500 animate-pulse">體檢中…</span> : (aiData?.health_check?.comment || <span className="text-gray-600">等待評估…</span>)}
+                                </div>
+                            </div>
+
+                            {/* AI 盤前開盤分析 */}
                             <div className="panel-card bg-[#050505] flex-1 flex flex-col">
                                 <div className="bg-blue-950/20 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-blue-400 font-bold text-[10px] uppercase">AI 盤前開盤分析</span>
                                 </div>
                                 <div className="p-2 text-[10px] lg:text-xs text-gray-300 leading-relaxed overflow-y-auto custom-scrollbar flex-1 text-justify">
                                     {isAiLoading ? <span className="text-gray-500 animate-pulse">撰寫報告中…</span> : (aiData?.prediction?.open_analysis || <span className="text-gray-600">等待模型輸出…</span>)}
-                                </div>
-                            </div>
-
-                            <div className="panel-card bg-[#050505] flex-none">
-                                <div className="bg-cyan-950/20 border-b border-gray-800 p-1.5 px-2">
-                                    <span className="text-cyan-400 font-bold text-[10px] uppercase">總體聯動</span>
-                                </div>
-                                <div className="p-2 text-[10px] lg:text-xs space-y-1 font-mono">
-                                    <div className="flex justify-between border-b border-gray-800 pb-0.5"><span className="text-gray-500">大盤狀態 (加權)</span><span className="text-white truncate max-w-[120px] text-right">{aiData?.market?.taiex || '---'}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-500">費半狀態 (SOX)</span><span className="text-white truncate max-w-[120px] text-right">{aiData?.market?.sox || '---'}</span></div>
                                 </div>
                             </div>
                         </div>
