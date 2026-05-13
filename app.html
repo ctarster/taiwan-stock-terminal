@@ -22,7 +22,7 @@
         .panel-card { background-color: #050505; border: 1px solid rgba(255,255,255,0.06); border-radius: 0.25rem; }
         .predict-panel { border: 1px solid rgba(220, 38, 38, 0.4); animation: pulseBorder 3s infinite ease-in-out; }
         
-        /* 響應式字體大小調整 */
+        /* 響應式字體大小與間距調整 */
         @media (max-width: 1400px) {
             .responsive-text-sm { font-size: 0.7rem; }
             .responsive-text-base { font-size: 0.8rem; }
@@ -56,7 +56,6 @@
             '2603': '長榮', '2308': '台達電', '2382': '廣達', '3231': '緯創',
             '2356': '英業達', '2618': '陽明', '2615': '萬海', '2412': '中華電'
         };
-
         const getStockName = (id) => STOCK_NAMES[id] || id;
 
         const safeNum = (val, fallback = 0) => {
@@ -199,7 +198,7 @@
                     };
                 }
             } catch(e) {}
-            return { name: getStockName(target) }; // Fallback to predefined name
+            return { name: getStockName(target) };
         };
 
         const fetchHistoryData = async (target) => {
@@ -426,7 +425,6 @@
                 destroyCharts();
                 setIsChartLoading(true);
 
-                // 同時啟動即時與歷史請求
                 Promise.allSettled([
                     fetchTWSE_RealTime(stockId),
                     fetchHistoryData(stockId)
@@ -439,7 +437,6 @@
                     if (historyData.length > 0) {
                         setHistory(historyData);
                         
-                        // 【極速備援機制】如果 TWSE 沒給報價，直接用最後一根歷史 K 線頂上，確保 AI 觸發
                         if (!twseData || !twseData.price) {
                              const lastCandle = historyData[historyData.length - 1];
                              let prevClose = lastCandle.open;
@@ -481,29 +478,30 @@
                     setAiData(null);
                     try {
                         const prompt = `你是一名頂級機構的量化交易工程師與總經分析師。
-請根據以下參數，並調用你龐大的財經知識庫，針對台股 [${stockId} ${currentName}] 進行全面性的量化預測與基本面評估。
+請根據以下參數，並調用你龐大的財經知識庫，針對台股 [${stockId} ${currentName}] 進行全面性的量化預測、基本面與籌碼面評估。
 
 【當前技術特徵】
 現價: ${liveQuote.price}, 波動率 ATR(14): ${techFeatures.atr}, 動能 RSI(14): ${techFeatures.rsi}
 MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
 
 【分析任務指示】
-1. **價格預測：** 根據波動率與動能，計算明日的「預估開盤價」與「預估收盤價」（必須是數字，小數點兩位）。
-2. **機率分佈：** 給出明日上漲、盤整、下跌的機率（整數，總和為100）。
+1. **價格預測：** 根據波動率與動能，計算明日的「預估開盤價」與「預估收盤價」（小數點兩位）。
+2. **機率分佈：** 給出明日上漲、盤整、下跌的機率（整數，總和100）。
 3. **操作目標：** 設定防守的第一停利目標價 (TP1) 與嚴格停損價 (SL)。
-4. **戰略決策：** 綜合評估後，給予這檔股票一個整體戰略分數 (1-100) 與明確的操作結論 (如: 強力買進、逢高減碼、嚴守停損)。
-5. **總體聯動推算：** 調用你的知識庫，給出今日/近期「加權指數(大盤)」與「費城半導體指數(SOX)」的影響狀態與推估數值 (如: 17500, 或 偏多/偏空)。
-6. **基本面與估值填補：** 調用你的知識庫，提供該公司的「預估本益比」、「殖利率區間」、「股淨比推估」以及整體市值規模的判斷。
-7. **專業盤前開盤分析報告：** (字數要求：150-200字)。你必須融合技術面、近期的產業動態（如：財報預期、供應鏈狀況）撰寫一份專業報告。內容需包含：短線強弱評估、明日「高開」或「低開」的具體機率與理由、以及明確的早盤應對策略。
+4. **戰略決策：** 綜合評估後，給予這檔股票一個整體戰略分數 (1-100) 與明確操作結論 (如: 強力買進、逢高減碼、嚴守停損)。
+5. **總體與基本面：** 調用知識庫，給出大盤(加權)與費半(SOX)的狀態推估，以及該公司的市值、殖利率、股淨比、本益比推估。
+6. **籌碼與多空結構推估：** 調用知識庫與當前價量狀態，推估「主力(Main)」、「機構(Institution)」、「散戶(Retail)」目前的籌碼動向(短語描述，如: 積極買進、獲利了結、套牢恐慌等)，以及整體的「多空情緒比例」(Sentiment，0-100，大於50為偏多)。
+7. **專業盤前開盤分析報告：** (150-200字) 融合技術面、籌碼流向、近期產業動態(如財報、供應鏈)撰寫專業報告。需包含：短線強弱評估、明日「高開」或「低開」的具體機率與理由、以及明確的早盤應對策略。
 
 【格式限制】
 只能輸出純 JSON，嚴禁 markdown，禁止任何解釋文字。
-請確保 JSON 結構如下：
+JSON 結構：
 {
   "prediction": { "open": "數字", "close": "數字", "prob": { "up": 0, "flat": 0, "down": 0 }, "targets": { "tp1": "數字", "sl": "數字" }, "open_analysis": "專業的長篇分析報告" },
   "strategy": { "score": 0, "conclusion": "明確操作結論" },
-  "market": { "taiex": "大盤數值或狀態", "sox": "費半數值或狀態" },
-  "fundamentals": { "marketCap": "市值推估", "yield": "殖利率推估", "pb": "股淨比推估", "pe": "本益比推估", "forwardPE": "預估本益比" }
+  "market": { "taiex": "狀態推估", "sox": "狀態推估" },
+  "fundamentals": { "marketCap": "市值", "yield": "殖利率", "pb": "股淨比", "pe": "本益比", "forwardPE": "預估本益比" },
+  "chips": { "main": "主力動向描述", "institution": "機構動向描述", "retail": "散戶動向描述", "sentiment": 50 }
 }`;
 
                         const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
@@ -512,12 +510,12 @@ MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
                             body: JSON.stringify({
                                 model: DEFAULT_GROQ_MODEL,
                                 messages: [
-                                    { role: 'system', content: 'You are a professional quantitative analyst. You only output valid JSON matching the user requested schema.' },
+                                    { role: 'system', content: 'You are a quantitative analyst. Output strictly valid JSON matching the schema.' },
                                     { role: 'user', content: prompt }
                                 ],
                                 response_format: { type: 'json_object' }
                             })
-                        }, 20000);
+                        }, 25000);
 
                         if (cancelled || fetchGen.current !== gen) return;
                         if (!res.ok) throw new Error(`Groq API 錯誤 (${res.status})`);
@@ -531,7 +529,6 @@ MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
                         
                         if (!cancelled) {
                             setAiData(parsed);
-                            // 將 AI 推算的基本面更新回畫面
                             if(parsed.fundamentals) {
                                 setLiveQuote(prev => ({
                                     ...prev,
@@ -544,7 +541,7 @@ MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
                             }
                         }
                     } catch (e) {
-                        if (!cancelled) setStatusMsg(`預測失敗：${e.message}`);
+                        if (!cancelled) setStatusMsg(`AI 分析失敗：${e.message}`);
                     } finally {
                         if (!cancelled) setIsAiLoading(false);
                     }
@@ -577,7 +574,6 @@ MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
 
             return (
                 <div className="min-h-screen bg-[#030303] text-gray-200 font-sans p-2 flex flex-col" style={{ height: '100vh' }}>
-                    {/* Header */}
                     <header className="flex-none flex justify-between items-center mb-2 bg-[#0a0a0a] header-padding border border-gray-800 rounded">
                         <div className="flex items-center gap-4">
                             <h1 className="responsive-text-xl font-bold text-white tracking-tighter">
@@ -594,7 +590,7 @@ MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
                             </div>
                         </div>
                         <div className="flex gap-2 items-center">
-                            {isChartLoading && <span className="responsive-text-sm text-gray-500 animate-pulse hidden sm:inline">資料載入中…</span>}
+                            {isChartLoading && <span className="responsive-text-sm text-gray-500 animate-pulse hidden sm:inline">圖表載入中…</span>}
                             <input
                                 type="text" value={inputValue}
                                 onChange={e => setInputValue(e.target.value)}
@@ -646,7 +642,7 @@ MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
                                 {!customKey ? (
                                     <div className="text-center py-4 text-gray-500 responsive-text-sm">請先設定 Groq API 金鑰</div>
                                 ) : isAiLoading ? (
-                                    <div className="text-center py-4 text-red-400 responsive-text-sm animate-pulse">模型推理與基本面生成中…</div>
+                                    <div className="text-center py-4 text-red-400 responsive-text-sm animate-pulse">模型推理與生成中…</div>
                                 ) : (
                                     <>
                                         <div className="flex justify-between gap-2">
@@ -706,6 +702,35 @@ MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
                                 </div>
                             </div>
 
+                            {/* 籌碼與多空動態 - AI 推算 */}
+                            <div className="panel-card bg-[#050505] flex-none">
+                                <div className="bg-pink-950/20 border-b border-gray-800 panel-padding">
+                                    <span className="text-pink-400 font-bold responsive-text-sm tracking-widest uppercase">籌碼與多空 (AI 推估)</span>
+                                </div>
+                                <div className="panel-padding space-y-2 responsive-text-sm font-mono">
+                                    {[
+                                        ['主力動向', aiData?.chips?.main || '---', 'text-white'],
+                                        ['機構法人', aiData?.chips?.institution || '---', 'text-yellow-400'],
+                                        ['散戶狀態', aiData?.chips?.retail || '---', 'text-green-400']
+                                    ].map(([label, val, cls]) => (
+                                        <div key={label} className="flex justify-between border-b border-gray-800 pb-1">
+                                            <span className="text-gray-500">{label}</span>
+                                            <span className={cls}>{val}</span>
+                                        </div>
+                                    ))}
+                                    <div className="pt-1">
+                                        <div className="flex justify-between responsive-text-sm mb-1">
+                                            <span className="text-gray-400">多空情緒 (Sentiment)</span>
+                                            <span className={aiData?.chips?.sentiment > 50 ? 'text-red-400' : 'text-green-400'}>{aiData?.chips?.sentiment || 50}</span>
+                                        </div>
+                                        <div className="h-1.5 w-full bg-gray-800 rounded flex overflow-hidden">
+                                            <div style={{ width: `${aiData?.chips?.sentiment || 50}%` }} className="bg-red-500 transition-all duration-700"></div>
+                                            <div style={{ width: `${100 - (aiData?.chips?.sentiment || 50)}%` }} className="bg-green-500 transition-all duration-700"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
                             {/* 基本面 - AI 驅動 */}
                             <div className="panel-card bg-[#050505] flex-1 min-h-0 flex flex-col">
                                 <div className="bg-slate-900/40 border-b border-gray-800 panel-padding flex-none">
@@ -758,7 +783,7 @@ MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
                                 </div>
                                 <div className="panel-padding responsive-text-sm font-bold text-white leading-relaxed text-center py-3">
                                     {isAiLoading ? (
-                                        <span className="text-gray-500 animate-pulse font-normal">計算中…</span>
+                                        <span className="text-gray-500 animate-pulse font-normal">運算中…</span>
                                     ) : aiData?.strategy?.conclusion ? (
                                         aiData.strategy.conclusion
                                     ) : (
@@ -792,7 +817,7 @@ MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
                                 </div>
                                 <div className="panel-padding responsive-text-sm text-gray-300 leading-relaxed overflow-y-auto custom-scrollbar text-justify pb-4">
                                     {isAiLoading ? (
-                                        <span className="text-gray-500 animate-pulse">分析中…</span>
+                                        <span className="text-gray-500 animate-pulse">深度分析中…</span>
                                     ) : aiData?.prediction?.open_analysis ? (
                                         aiData.prediction.open_analysis
                                     ) : (
