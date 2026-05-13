@@ -536,9 +536,12 @@
 1. 計算明日的預估開盤價與收盤價（必須是數字）。
 2. 根據 ATR 與 RSI 給出上漲、盤整、下跌機率（整數，總和必須為100）。
 3. 設定第一停利目標價 (TP1) 與嚴格停損價 (SL)（必須是數字）。
-4. 分析明日高開/低開的可能劇本與應對策略。
+4. 撰寫一份詳盡且專業的「盤前開盤分析報告 (open_analysis)」。字數需達 150-200 字。內容必須包含：
+   - 綜合技術面 (MACD, KDJ, RSI) 的短線強弱評估。
+   - 明日開盤「高開」或「低開」的具體機率，以及支撐這項判斷的理由（如：是否面臨獲利了結賣壓？是否受前高壓力影響？）。
+   - 給予明確的早盤應對策略（例如：若高開超過某區間應如何動作，若低開防守點在哪裡）。
 5. 只能輸出純 JSON，嚴禁任何 markdown 或說明文字。
-格式：{"prediction":{"open":"","close":"","prob":{"up":0,"flat":0,"down":0},"targets":{"tp1":"","sl":""},"open_analysis":"分析明日高開或低開的機率與原因"},"market":{"taiex":"","sox":""},"strategy":{"score":0,"conclusion":""}}`;
+格式：{"prediction":{"open":"","close":"","prob":{"up":0,"flat":0,"down":0},"targets":{"tp1":"","sl":""},"open_analysis":"（此處填寫 150-200 字的專業詳盡分析報告）"},"market":{"taiex":"","sox":""},"strategy":{"score":0,"conclusion":""}}`;
 
                         const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
                             method: 'POST',
