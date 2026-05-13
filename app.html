@@ -467,7 +467,7 @@
                     if (q && q.price !== null) {
                         if (q.name) setCurrentName(q.name);
                         
-                        // 修復：嚴格計算漲跌幅，確保不會出現 --- 和 0.00
+                        // 確保漲跌幅計算正確
                         let finalChange = q.change;
                         let finalPercent = q.percent;
                         
@@ -495,7 +495,7 @@
                             const last = rows[rows.length - 1];
                             const prevLast = rows.length > 1 ? rows[rows.length - 2] : last;
                             
-                            // 修復：使用歷史資料做備援時，確實計算假漲跌幅
+                            // 歷史資料備援計算
                             const fallbackPrice = last.close;
                             const fallbackPrevClose = prevLast.close;
                             const fallbackChange = fallbackPrice - fallbackPrevClose;
@@ -623,7 +623,7 @@
                             <div className="h-5 w-px bg-gray-700"></div>
                             
                             <div className="flex items-center gap-2">
-                                <span className={`text-2xl lg:text-3xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'} value-update`} key={liveQuote.price}>
+                                <span className={`text-2xl lg:text-3xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'} value-update flex gap-1 h-8 items-center overflow-hidden`} key={liveQuote.price}>
                                     {liveQuote.price ? fmtPrice(liveQuote.price) : '---'}
                                 </span>
                                 {liveQuote.status === 'fallback' && (
@@ -634,9 +634,9 @@
                                 )}
                             </div>
 
-                            <div className={`flex flex-col responsive-text-sm font-bold font-mono ${isUp ? 'text-red-500' : 'text-green-500'}`}>
-                                <span className="value-update" key={liveQuote.change}>{fmtChange(liveQuote.change)}</span>
-                                <span className="value-update" key={liveQuote.percent}>{fmtPct(liveQuote.percent)}</span>
+                            <div className={`flex flex-col responsive-text-sm font-bold font-mono ${isUp ? 'text-red-500' : 'text-green-500'} overflow-hidden h-8 justify-center`}>
+                                <span className="value-update leading-tight" key={liveQuote.change}>{fmtChange(liveQuote.change)}</span>
+                                <span className="value-update leading-tight" key={liveQuote.percent}>{fmtPct(liveQuote.percent)}</span>
                             </div>
                         </div>
                         <div className="flex gap-2 items-center">
@@ -675,7 +675,6 @@
                     <main className="flex-1 grid grid-cols-12 gap-1 lg:gap-2 overflow-hidden min-h-0 animate-fade-in">
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-1 lg:gap-2 overflow-y-auto custom-scrollbar pr-1 min-h-0">
                             
-                            {/* 階段二：統計預測面板 (純數學運算) */}
                             <div className="panel-card predict-panel panel-padding bg-blue-950/10 flex flex-col gap-2 relative overflow-hidden">
                                 <div className="flex justify-between items-center border-b border-blue-900/50 pb-1">
                                     <span className="text-blue-400 font-bold responsive-text-sm tracking-widest">JS 統計波動率模型</span>
@@ -723,7 +722,6 @@
                                 )}
                             </div>
 
-                            {/* 盤中明細 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-gray-900/40 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-gray-300 font-bold text-[10px] tracking-widest uppercase">今日交易明細</span>
@@ -736,7 +734,6 @@
                                 </div>
                             </div>
 
-                            {/* AI 籌碼與多空 */}
                             <div className="panel-card chips-panel bg-[#050505] flex-none">
                                 <div className="bg-yellow-950/20 border-b border-yellow-900/30 p-1.5 px-2 flex justify-between items-center">
                                     <span className="text-yellow-500 font-bold text-[10px] lg:text-xs tracking-widest uppercase">籌碼與多空 (AI 推估)</span>
@@ -792,7 +789,6 @@
                             </div>
                         </div>
 
-                        {/* 中間圖表區 */}
                         <div className="col-span-12 lg:col-span-6 flex flex-col border border-gray-800 bg-[#050505] rounded overflow-hidden min-h-[300px] lg:min-h-0">
                             <div className="bg-gray-900/50 p-1.5 flex flex-wrap gap-2 lg:gap-3 text-[9px] lg:text-[10px] font-mono border-b border-gray-800 text-gray-400 flex-none">
                                 <span>開:<span className="text-gray-200">{fmtPrice(hoverData?.open)}</span></span>
@@ -809,7 +805,6 @@
                             </div>
                         </div>
 
-                        {/* 右側面板 */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-1 lg:gap-2 overflow-y-auto custom-scrollbar pl-1 min-h-0">
                             
                             <div className="panel-card bg-[#050505] flex-none">
