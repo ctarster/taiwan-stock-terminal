@@ -19,13 +19,22 @@
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
         * { scrollbar-width: thin; scrollbar-color: #333 #000; }
         
-        @keyframes pulseBorder { 0%, 100% { border-color: rgba(220, 38, 38, 0.3); } 50% { border-color: rgba(220, 38, 38, 0.8); } }
+        @keyframes pulseBorder { 0%, 100% { border-color: rgba(220, 38, 38, 0.3); box-shadow: 0 0 5px rgba(220, 38, 38, 0.1); } 50% { border-color: rgba(220, 38, 38, 0.8); box-shadow: 0 0 15px rgba(220, 38, 38, 0.3); } }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes numberChange { 0% { transform: scale(1.1); color: #fff; } 100% { transform: scale(1); } }
+        
+        .animate-slide-in { animation: slideIn 0.4s ease-out forwards; }
+        .animate-fade-in { animation: fadeIn 0.5s ease-out forwards; }
+        .value-update { animation: numberChange 0.3s ease-out; }
+        
         .glass-panel { background: rgba(10, 10, 10, 0.97); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); }
-        .panel-card { background-color: #050505; border: 1px solid rgba(255,255,255,0.06); border-radius: 0.25rem; }
+        .panel-card { background-color: #050505; border: 1px solid rgba(255,255,255,0.06); border-radius: 0.25rem; transition: all 0.3s ease; }
+        .panel-card:hover { border-color: rgba(255,255,255,0.15); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
         .predict-panel { border: 1px solid rgba(220, 38, 38, 0.4); animation: pulseBorder 3s infinite ease-in-out; }
         .chips-panel { border: 1px solid rgba(234, 179, 8, 0.4); }
 
-        /* 響應式字體與間距調整 */
+        /* 響應式排版微調 */
         @media (max-width: 1400px) {
             .responsive-text-sm { font-size: 0.65rem; }
             .responsive-text-base { font-size: 0.75rem; }
@@ -42,6 +51,11 @@
             .panel-padding { padding: 0.75rem; }
             .gap-responsive { gap: 0.5rem; }
         }
+
+        .data-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.25rem; margin-bottom: 0.25rem; }
+        .data-row:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+        .data-label { color: #6b7280; }
+        .data-value { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-weight: bold; text-align: right; }
     </style>
 </head>
 <body>
@@ -52,15 +66,11 @@
 
         const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
 
-        // 預設股票名稱對照表 (Fallback)
         const STOCK_NAMES = {
             '2330': '台積電', '2317': '鴻海', '2454': '聯發科', '3481': '群創', 
             '2603': '長榮', '2609': '陽明', '2615': '萬海', '2382': '廣達', '3231': '緯創'
         };
 
-        // ==========================================
-        // 核心模組 1：安全資料處理與格式化
-        // ==========================================
         const safeNum = (val, fallback = 0) => {
             if (val === null || val === undefined || val === '' || val === '-') return fallback;
             const n = Number(val);
@@ -70,10 +80,10 @@
         const fmtChange  = v => { if (v == null || isNaN(+v)) return '---'; return +v > 0 ? `+${(+v).toFixed(2)}` : (+v).toFixed(2); };
         const fmtPct     = v => { if (v == null || isNaN(+v)) return '---'; return +v > 0 ? `+${(+v).toFixed(2)}%` : `${(+v).toFixed(2)}%`; };
         const fmtVol     = v => (v == null || isNaN(+v)) ? '0' : Math.round(+v).toLocaleString('en-US');
+        
+        // 新增單位格式化輔助函數
+        const fmtUnit = (val, unit) => (val == null || val === '---' || val === '') ? '---' : `${val}${unit}`;
 
-        // ==========================================
-        // 核心模組 2：量化指標運算引擎
-        // ==========================================
         const Indicators = {
             ema(data, period) {
                 if (!data || data.length === 0) return [];
@@ -138,9 +148,6 @@
             }
         };
 
-        // ==========================================
-        // 核心模組 3：抗阻塞大逃殺代理引擎
-        // ==========================================
         const fetchWithTimeout = async (url, opts = {}, ms = 8000) => {
             const ctrl = new AbortController();
             const tid = setTimeout(() => ctrl.abort(), ms);
@@ -178,26 +185,22 @@
                             json = JSON.parse(text);
                         }
                         
-                        // 嚴格指紋檢查，避免代理伺服器回傳錯誤網頁的 HTML
                         if (json && (json.chart || json.quoteResponse || json.msgArray || json.data)) {
                             return json;
                         }
-                        throw new Error('Invalid Payload Structure');
+                        throw new Error('Invalid Payload');
                     } catch (e) {
                         clearTimeout(tid);
                         throw e;
                     }
                 }));
-                ctrls.forEach(c => { try { c.abort(); } catch (_) {} }); // 結束其他請求
+                ctrls.forEach(c => { try { c.abort(); } catch (_) {} });
                 return result;
             } catch {
                 return null;
             }
         };
 
-        // ==========================================
-        // 核心模組 4：數據採集與清洗管線
-        // ==========================================
         const fetchTWSELive = async (id) => {
             const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${id}.tw|otc_${id}.tw&json=1&delay=0`;
             try {
@@ -218,7 +221,7 @@
                     };
                 }
             } catch {}
-            return { name: STOCK_NAMES[id] || id }; // 至少回傳名字
+            return { name: STOCK_NAMES[id] || id };
         };
 
         const fetchHistory = async (id) => {
@@ -226,7 +229,6 @@
             start.setFullYear(start.getFullYear() - 1);
             const ds = `${start.getFullYear()}-${String(start.getMonth()+1).padStart(2,'0')}-${String(start.getDate()).padStart(2,'0')}`;
             try {
-                // FinMind 官方 API (支援 CORS，免 Proxy)
                 const res = await fetchWithTimeout(
                     `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${id}&start_date=${ds}`,
                     {}, 7000
@@ -239,7 +241,7 @@
                         high:   safeNum(d.max),
                         low:    safeNum(d.min),
                         close:  safeNum(d.close),
-                        volume: safeNum(d.Trading_Volume) / 1000 // 轉千股(張)
+                        volume: safeNum(d.Trading_Volume) / 1000
                     }));
                 }
             } catch (e) { console.warn('FinMind failed', e); }
@@ -253,9 +255,6 @@
             marketCap: '---', pe: '---', pb: '---', yield: '---', forwardPE: '---'
         });
 
-        // ==========================================
-        // 主應用程式 App Component
-        // ==========================================
         const App = () => {
             const [stockId,      setStockId]      = useState('3481');
             const [currentName,  setCurrentName]  = useState('群創');
@@ -274,7 +273,6 @@
             const [showSettings,   setShowSettings]   = useState(false);
             const [hoverData,      setHoverData]      = useState(null);
 
-            // 自選追蹤清單狀態
             const [watchlist, setWatchlist] = useState(() => {
                 try {
                     return JSON.parse(localStorage.getItem('quant_watchlist_pro')) || [
@@ -286,10 +284,7 @@
             const [watchlistQuotes, setWatchlistQuotes] = useState({});
             const [isWatchlistExpanded, setIsWatchlistExpanded] = useState(true);
 
-            const containerRefs = {
-                kline: useRef(null), vol: useRef(null),
-                macd:  useRef(null), kdj: useRef(null)
-            };
+            const containerRefs = { kline: useRef(null), vol: useRef(null), macd:  useRef(null), kdj: useRef(null) };
             const chartRefs     = useRef({});
             const seriesRefs    = useRef({});
             const chartInited   = useRef(false);
@@ -305,7 +300,6 @@
                 });
             };
 
-            // 自選清單背景輪詢
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -315,22 +309,17 @@
                         try {
                             const rtData = await fetchTWSELive(item.id);
                             if (rtData && rtData.price !== null) {
-                                setWatchlistQuotes(prev => ({
-                                    ...prev,
-                                    [item.id]: { price: rtData.price, change: rtData.change, percent: rtData.percent }
-                                }));
+                                setWatchlistQuotes(prev => ({ ...prev, [item.id]: { price: rtData.price, change: rtData.change, percent: rtData.percent } }));
                             }
                         } catch(e){}
-                        await new Promise(r => setTimeout(r, 200)); // 避免觸發限流
+                        await new Promise(r => setTimeout(r, 200)); 
                     }
                 };
-                
                 updateWatchlistQuotes();
                 const interval = setInterval(updateWatchlistQuotes, 8000); 
                 return () => { isActive = false; clearInterval(interval); };
             }, [watchlist]);
 
-            // ─── 圖表初始化 ──────────────────────────────────────────────────────────
             const destroyCharts = useCallback(() => {
                 Object.values(chartRefs.current).forEach(c => { try { c.remove(); } catch {} });
                 chartRefs.current = {};
@@ -341,7 +330,7 @@
             const initCharts = useCallback(() => {
                 if (!window.LightweightCharts || chartInited.current) return;
                 const el = containerRefs.kline.current;
-                if (!el || el.clientWidth === 0) return; // 確保容器已渲染
+                if (!el || el.clientWidth === 0) return;
 
                 const w = el.clientWidth;
                 const base = {
@@ -375,7 +364,6 @@
                 seriesRefs.current  = { kSeries, ma5Series, ma20Series, vSeries, mDif, mDea, mHist, kjK, kjD, kjJ };
                 chartInited.current = true;
 
-                // 同步時間軸縮放
                 kChart.timeScale().subscribeVisibleLogicalRangeChange(r => {
                     if (r) [vChart, mChart, kjChart].forEach(c => c.timeScale().setVisibleLogicalRange(r));
                 });
@@ -387,15 +375,11 @@
                 ro.observe(containerRefs.kline.current);
             }, []);
 
-            // ─── 合併歷史與即時報價，並嚴格去重 ──────────────────────────────────────
             const chartData = useMemo(() => {
                 if (!history.length) return [];
-                
-                // 使用 Map 確保時間序列唯一性 (去重)
                 const dataMap = new Map();
                 history.forEach(d => dataMap.set(d.time, d));
 
-                // 若有最新報價，覆蓋或新增當日 K 棒
                 if (liveQuote.price) {
                     const now = new Date();
                     const twUtc = now.getTime() + (now.getTimezoneOffset() * 60000) + (8 * 3600000);
@@ -419,16 +403,11 @@
                         });
                     }
                 }
-                
-                // 轉回陣列並排序
                 return Array.from(dataMap.values()).sort((a, b) => a.time.localeCompare(b.time));
             }, [history, liveQuote]);
 
-            // ─── 圖表渲染與特徵萃取 ──────────────────────────────────────────────────
             useEffect(() => {
                 if (!chartData.length) return;
-                
-                // 確保容器有寬度才繪圖
                 if (!containerRefs.kline.current || containerRefs.kline.current.clientWidth === 0) return;
                 if (!chartInited.current) initCharts();
                 
@@ -450,14 +429,12 @@
                     k: k[i], d: d[i], j: j[i]
                 }));
 
-                // Crosshair hover
                 chartRefs.current.kChart.subscribeCrosshairMove(param => {
                     const found = param.time ? enriched.find(e => e.time === param.time) : null;
                     setHoverData(found || enriched[enriched.length - 1]);
                 });
                 setHoverData(enriched[enriched.length - 1]);
 
-                // 萃取最新特徵供 AI 使用
                 const latest = enriched[enriched.length - 1];
                 const newFeatures = {
                     atr:  latest.atr.toFixed(2),
@@ -468,7 +445,6 @@
                 setTechFeatures(newFeatures);
                 setTechVersion(v => v + 1);
 
-                // 強制在下一個重繪週期寫入資料，避免阻塞
                 requestAnimationFrame(() => {
                     try {
                         s.kSeries.setData(chartData);
@@ -485,7 +461,6 @@
                 });
             }, [chartData, initCharts]);
 
-            // ─── 資料載入與防呆備援 ──────────────────────────────────────────────────
             useEffect(() => {
                 const gen = ++fetchGen.current;
 
@@ -499,7 +474,6 @@
 
                 let isTwseDone = false;
 
-                // 1. 即時報價
                 fetchTWSELive(stockId).then(q => {
                     if (fetchGen.current !== gen) return;
                     isTwseDone = true;
@@ -510,7 +484,6 @@
                     }
                 });
 
-                // 2. 歷史資料 (若 TWSE 太慢，以歷史最後一筆強行補上現價)
                 fetchHistory(stockId).then(rows => {
                     if (fetchGen.current !== gen) return;
                     if (rows.length > 0) {
@@ -536,7 +509,6 @@
 
             }, [stockId, destroyCharts]);
 
-            // ─── AI 預測引擎 ────────────────────────────────────────────────────────
             useEffect(() => {
                 if (!techFeatures || !customKey || !liveQuote.price) return;
                 const gen = fetchGen.current;
@@ -546,25 +518,27 @@
                     setIsAiLoading(true);
                     setAiData(null);
                     try {
-                        const prompt = `你是一名頂級機構的量化交易工程師。請根據以下參數計算並預測台股 [${stockId}] 次日的走勢，並推算籌碼與基本面。
+                        const prompt = `你是一名頂級機構的量化交易工程師。請根據以下參數與你的金融知識庫，計算並預測台股 [${stockId} ${currentName}] 次日的走勢，並推算總體經濟與基本面狀態。
 【當前特徵】現價: ${liveQuote.price}, 波動率 ATR(14): ${techFeatures.atr}, 動能 RSI(14): ${techFeatures.rsi}, MACD DIF: ${techFeatures.macd.dif}, MACD DEA: ${techFeatures.macd.dea}, KDJ J值: ${techFeatures.kdj.j}。
 【任務限制】
 1. 計算明日的預估開盤價與收盤價（必須是數字）。
-2. 根據特徵，撰寫 100 字以上的「open_analysis (盤前開盤分析)」，需涵蓋高開/低開可能與早盤應對策略。
-3. 根據公司現況與大盤動態，推估「基本面與總體經濟 (market)」，必須填寫所有空缺數值(如市值、本益比、大盤狀態等)，嚴禁留空。
-4. 推估籌碼動向 (chips)：主力、機構、散戶動態，並給出 0~100 的多空指標 (bull_bear_index，>50偏多)。
+2. 根據特徵，撰寫「open_analysis (盤前開盤分析)」。要求：條列式或極短句，精簡扼要，重點指出高開/低開的應對策略與支撐壓力位。
+3. 推估「基本面與總體經濟 (market)」，必須填寫所有空缺數值(市值單位用'億'或'兆'，本益比/殖利率用數字)，嚴禁留空。包含：taiex(大盤狀態描述), sox(費半狀態描述), marketCap(預估市值), pe(預估本益比), pb(預估股淨比), yield(預估殖利率)。
+4. 推估籌碼動向 (chips)：主力量能、機構動態、散戶情緒(簡短描述)，並給出 0~100 的多空指標 (bull_bear_index)。
 5. 設定第一停利目標價 (TP1) 與嚴格停損價 (SL)（必須是數字）。
-6. 生成健檢分析 (health_check): 提供1-100分的綜合健康分數，以及一句簡短有力的體質點評。
-7. 只能輸出純 JSON，嚴禁任何 markdown 標記。
-格式：{"prediction":{"open":"","close":"","open_analysis":"","prob":{"up":0,"flat":0,"down":0},"targets":{"tp1":"","sl":""}},"market":{"taiex":"","sox":"","marketCap":"","pe":""},"chips":{"big_player":"","institution":"","retail":"","bull_bear_index":0},"strategy":{"score":0,"conclusion":""},"health_check":{"score":0,"comment":""}}`;
+6. 生成健檢分析 (health_check): 提供1-100分的綜合健康分數，以及一句「極短」的體質點評。
+7. 生成戰略矩陣 (strategy): 給出 1-100 操作分數，與明確的「簡短操作結論」(如：分批買進、觀望、嚴格停損)。
+8. 只能輸出純 JSON，嚴禁任何 markdown。
+格式：{"prediction":{"open":"","close":"","open_analysis":"","prob":{"up":0,"flat":0,"down":0},"targets":{"tp1":"","sl":""}},"market":{"taiex":"","sox":"","marketCap":"","pe":"","pb":"","yield":""},"chips":{"big_player":"","institution":"","retail":"","bull_bear_index":0},"strategy":{"score":0,"conclusion":""},"health_check":{"score":0,"comment":""}}`;
 
                         const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
                             method: 'POST',
                             headers: { Authorization: `Bearer ${customKey}`, 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                                 model: DEFAULT_GROQ_MODEL,
+                                temperature: 0.1, // 強制降低隨機性，讓預測價格趨於穩定
                                 messages: [
-                                    { role: 'system', content: 'You are a quantitative analysis engine. You must output valid JSON ONLY. No markdown formatting.' },
+                                    { role: 'system', content: 'You are a quantitative analysis engine. You must output valid JSON ONLY. Be extremely concise in text fields.' },
                                     { role: 'user', content: prompt }
                                 ],
                                 response_format: { type: 'json_object' }
@@ -589,7 +563,6 @@
                 };
                 run();
                 return () => { cancelled = true; };
-            // eslint-disable-next-line react-hooks/exhaustive-deps
             }, [techVersion, customKey]);
 
             const handleSearch = () => {
@@ -615,19 +588,19 @@
             return (
                 <div className="min-h-screen bg-[#030303] text-gray-200 font-sans p-1 lg:p-2 flex flex-col" style={{ height: '100vh' }}>
                     {/* Header */}
-                    <header className="flex-none flex justify-between items-center mb-1 lg:mb-2 bg-[#0a0a0a] header-padding border border-gray-800 rounded shadow-xl">
+                    <header className="flex-none flex justify-between items-center mb-1 lg:mb-2 bg-[#0a0a0a] header-padding border border-gray-800 rounded shadow-xl animate-slide-in">
                         <div className="flex items-center gap-3">
                             <h1 className="responsive-text-lg font-bold text-white tracking-tighter">
                                 {currentName}
                                 <span className="text-blue-500 font-mono responsive-text-sm ml-2">{stockId}</span>
                             </h1>
                             <div className="h-5 w-px bg-gray-700"></div>
-                            <span className={`text-2xl lg:text-3xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'}`}>
+                            <span className={`text-2xl lg:text-3xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'} value-update`} key={liveQuote.price}>
                                 {liveQuote.price ? fmtPrice(liveQuote.price) : '---'}
                             </span>
                             <div className={`flex flex-col responsive-text-sm font-bold font-mono ${isUp ? 'text-red-500' : 'text-green-500'}`}>
-                                <span>{fmtChange(liveQuote.change)}</span>
-                                <span>{fmtPct(liveQuote.percent)}</span>
+                                <span className="value-update" key={liveQuote.change}>{fmtChange(liveQuote.change)}</span>
+                                <span className="value-update" key={liveQuote.percent}>{fmtPct(liveQuote.percent)}</span>
                             </div>
                         </div>
                         <div className="flex gap-2 items-center">
@@ -642,35 +615,37 @@
                                 onChange={e => setInputValue(e.target.value)}
                                 onKeyDown={e => e.key === 'Enter' && handleSearch()}
                                 placeholder="輸入代號"
-                                className="w-24 lg:w-32 bg-[#111] border border-gray-700 px-2 py-1 responsive-text-sm rounded text-white outline-none"
+                                className="w-24 lg:w-32 bg-[#111] border border-gray-700 px-2 py-1 responsive-text-sm rounded text-white outline-none transition-colors focus:border-blue-500"
                             />
-                            <button onClick={handleSearch} className="bg-blue-900 border border-blue-700 px-3 py-1 responsive-text-sm font-bold rounded text-white hover:bg-blue-800">查詢</button>
-                            <button onClick={() => setShowSettings(s => !s)} className="bg-gray-800 border border-gray-600 px-3 py-1 responsive-text-sm font-bold rounded text-white hover:bg-gray-700">Groq 設定</button>
+                            <button onClick={handleSearch} className="bg-blue-900 border border-blue-700 px-3 py-1 responsive-text-sm font-bold rounded text-white hover:bg-blue-800 transition-colors">查詢</button>
+                            <button onClick={() => setShowSettings(s => !s)} className="bg-gray-800 border border-gray-600 px-3 py-1 responsive-text-sm font-bold rounded text-white hover:bg-gray-700 transition-colors">Groq 設定</button>
                         </div>
                     </header>
 
+                    {/* Settings Modal */}
                     {showSettings && (
-                        <div ref={settingsRef} className="absolute top-16 right-4 z-[100] w-80 p-4 glass-panel rounded shadow-2xl">
+                        <div ref={settingsRef} className="absolute top-16 right-4 z-[100] w-80 p-4 glass-panel rounded shadow-2xl animate-fade-in">
                             <h3 className="responsive-text-sm font-bold text-blue-400 mb-2 uppercase tracking-widest">Groq API 配置</h3>
                             <p className="text-[10px] text-gray-500 mb-2">免費申請：console.groq.com</p>
                             <input
                                 type="password" value={customKey}
                                 onChange={e => setCustomKey(e.target.value)}
                                 placeholder="gsk_..."
-                                className="w-full bg-black border border-gray-700 p-2 text-xs rounded font-mono mb-3 text-white outline-none"
+                                className="w-full bg-black border border-gray-700 p-2 text-xs rounded font-mono mb-3 text-white outline-none focus:border-blue-500 transition-colors"
                             />
-                            <button onClick={saveKey} className="w-full bg-blue-600 text-white py-1.5 responsive-text-sm font-bold rounded hover:bg-blue-700">儲存並重啟預測引擎</button>
+                            <button onClick={saveKey} className="w-full bg-blue-600 text-white py-1.5 responsive-text-sm font-bold rounded hover:bg-blue-700 transition-colors">儲存並重啟預測引擎</button>
                         </div>
                     )}
 
+                    {/* Status Message */}
                     {statusMsg && (
-                        <div className="flex-none bg-red-900/30 border border-red-500 text-red-300 responsive-text-sm p-1.5 mb-1 rounded flex justify-between items-center">
+                        <div className="flex-none bg-red-900/30 border border-red-500 text-red-300 responsive-text-sm p-1.5 mb-1 rounded flex justify-between items-center animate-fade-in">
                             <span>{statusMsg}</span>
                             <button onClick={() => setStatusMsg(null)} className="ml-2 text-red-400 hover:text-white">✕</button>
                         </div>
                     )}
 
-                    <main className="flex-1 grid grid-cols-12 gap-1 lg:gap-2 overflow-hidden min-h-0">
+                    <main className="flex-1 grid grid-cols-12 gap-1 lg:gap-2 overflow-hidden min-h-0 animate-fade-in">
                         {/* 左側面板 (預測與籌碼) */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-1 lg:gap-2 overflow-y-auto custom-scrollbar pr-1 min-h-0">
                             {/* Groq 預測 */}
@@ -683,22 +658,22 @@
                                 ) : isAiLoading ? (
                                     <div className="text-center py-2 text-red-400 responsive-text-sm animate-pulse">模型推理中…</div>
                                 ) : (
-                                    <>
-                                        <div className="flex justify-between gap-1">
+                                    <div className="animate-fade-in">
+                                        <div className="flex justify-between gap-1 mb-2">
                                             {[['明日開盤預估', aiData?.prediction?.open], ['明日收盤預估', aiData?.prediction?.close]].map(([label, val]) => (
                                                 <div key={label} className="flex-1 bg-black/60 border border-red-900/30 rounded p-1.5 text-center">
                                                     <div className="text-[10px] lg:text-xs text-gray-500 mb-0.5">{label}</div>
-                                                    <div className="text-base lg:text-lg font-mono font-black text-white">{val || '---'}</div>
+                                                    <div className="text-base lg:text-lg font-mono font-black text-white value-update" key={val}>{val || '---'}</div>
                                                 </div>
                                             ))}
                                         </div>
 
-                                        <div className="bg-black/40 border border-gray-800 rounded p-1.5">
+                                        <div className="bg-black/40 border border-gray-800 rounded p-1.5 mb-2">
                                             <div className="text-[10px] text-gray-400 mb-1">機率分佈預估</div>
                                             <div className="h-1.5 w-full bg-gray-800 rounded flex overflow-hidden">
-                                                <div style={{ width: `${aiData?.prediction?.prob?.up || 0}%` }} className="bg-red-500 transition-all duration-700"></div>
-                                                <div style={{ width: `${aiData?.prediction?.prob?.flat || 0}%` }} className="bg-gray-400 transition-all duration-700"></div>
-                                                <div style={{ width: `${aiData?.prediction?.prob?.down || 0}%` }} className="bg-green-500 transition-all duration-700"></div>
+                                                <div style={{ width: `${aiData?.prediction?.prob?.up || 0}%` }} className="bg-red-500 transition-all duration-1000 ease-out"></div>
+                                                <div style={{ width: `${aiData?.prediction?.prob?.flat || 0}%` }} className="bg-gray-400 transition-all duration-1000 ease-out"></div>
+                                                <div style={{ width: `${aiData?.prediction?.prob?.down || 0}%` }} className="bg-green-500 transition-all duration-1000 ease-out"></div>
                                             </div>
                                             <div className="flex justify-between text-[9px] mt-1 font-mono">
                                                 <span className="text-red-400">漲 {aiData?.prediction?.prob?.up ?? '--'}%</span>
@@ -708,16 +683,16 @@
                                         </div>
 
                                         <div className="flex flex-col gap-0.5 text-[10px] lg:text-xs font-mono border-t border-red-900/30 pt-1">
-                                            <div className="flex justify-between">
-                                                <span className="text-gray-400">目標一 (TP1)</span>
-                                                <span className="text-red-400 font-bold">{aiData?.prediction?.targets?.tp1 || '---'}</span>
+                                            <div className="data-row">
+                                                <span className="data-label">目標一 (TP1)</span>
+                                                <span className="data-value text-red-400">{aiData?.prediction?.targets?.tp1 || '---'}</span>
                                             </div>
-                                            <div className="flex justify-between">
-                                                <span className="text-gray-400">停損線 (SL)</span>
-                                                <span className="text-green-400 font-bold">{aiData?.prediction?.targets?.sl || '---'}</span>
+                                            <div className="data-row">
+                                                <span className="data-label">停損線 (SL)</span>
+                                                <span className="data-value text-green-400">{aiData?.prediction?.targets?.sl || '---'}</span>
                                             </div>
                                         </div>
-                                    </>
+                                    </div>
                                 )}
                             </div>
 
@@ -731,13 +706,13 @@
                                         </div>
                                     )}
                                 </div>
-                                <div className="p-2 space-y-1.5 text-[10px] lg:text-xs font-mono">
-                                    {isAiLoading ? <div className="text-center text-gray-500 py-1">運算中…</div> : (
-                                        <>
-                                            <div className="flex justify-between border-b border-gray-800 pb-0.5"><span className="text-gray-500">主力動向</span><span className="text-white">{aiData?.chips?.big_player || '---'}</span></div>
-                                            <div className="flex justify-between border-b border-gray-800 pb-0.5"><span className="text-gray-500">機構法人</span><span className="text-blue-400">{aiData?.chips?.institution || '---'}</span></div>
-                                            <div className="flex justify-between pb-0.5"><span className="text-gray-500">散戶情緒</span><span className="text-yellow-400">{aiData?.chips?.retail || '---'}</span></div>
-                                        </>
+                                <div className="p-2 space-y-1.5 text-[10px] lg:text-xs">
+                                    {isAiLoading ? <div className="text-center text-gray-500 py-1 animate-pulse">運算中…</div> : (
+                                        <div className="animate-fade-in">
+                                            <div className="data-row"><span className="data-label">主力動向</span><span className="data-value text-white truncate max-w-[120px]" title={aiData?.chips?.big_player}>{aiData?.chips?.big_player || '---'}</span></div>
+                                            <div className="data-row"><span className="data-label">機構法人</span><span className="data-value text-blue-400 truncate max-w-[120px]" title={aiData?.chips?.institution}>{aiData?.chips?.institution || '---'}</span></div>
+                                            <div className="data-row"><span className="data-label">散戶情緒</span><span className="data-value text-yellow-400 truncate max-w-[120px]" title={aiData?.chips?.retail}>{aiData?.chips?.retail || '---'}</span></div>
+                                        </div>
                                     )}
                                 </div>
                             </div>
@@ -754,31 +729,28 @@
                                         ['MACD.DIF', techFeatures?.macd?.dif, 'text-white'],
                                         ['KDJ.J', techFeatures?.kdj?.j, 'text-pink-400']
                                     ].map(([label, val, cls]) => (
-                                        <div key={label} className="flex justify-between border-b border-gray-800 border-dotted pb-0.5">
-                                            <span className="text-gray-500">{label}</span>
-                                            <span className={cls}>{val ?? '--'}</span>
+                                        <div key={label} className="data-row border-b-0 border-dotted border-gray-800 pb-0.5">
+                                            <span className="data-label">{label}</span>
+                                            <span className={`data-value ${cls} value-update`} key={val}>{val ?? '--'}</span>
                                         </div>
                                     ))}
                                 </div>
                             </div>
 
-                            {/* 基本面 */}
+                            {/* 基本面 (修復對齊與單位) */}
                             <div className="panel-card bg-[#050505] flex-1">
                                 <div className="bg-slate-900/40 border-b border-gray-800 p-1.5 px-2">
-                                    <span className="text-gray-300 font-bold text-[10px] tracking-widest uppercase">基本面與估值</span>
+                                    <span className="text-gray-300 font-bold text-[10px] tracking-widest uppercase">基本面與估值 (AI 估算)</span>
                                 </div>
-                                <div className="p-2 space-y-1.5 text-[10px] lg:text-xs font-mono">
-                                    {[
-                                        ['總市值', aiData?.market?.marketCap || liveQuote.marketCap, 'text-white'],
-                                        ['本益比 (PE)', aiData?.market?.pe || liveQuote.pe, 'text-yellow-400'],
-                                        ['殖利率', liveQuote.yield, 'text-white'],
-                                        ['股淨比 (PB)', liveQuote.pb, 'text-white']
-                                    ].map(([label, val, cls]) => (
-                                        <div key={label} className="flex justify-between border-b border-gray-800 pb-0.5">
-                                            <span className="text-gray-500">{label}</span>
-                                            <span className={cls}>{val}</span>
+                                <div className="p-2 space-y-1.5 text-[10px] lg:text-xs">
+                                    {isAiLoading ? <div className="text-center text-gray-500 py-1 animate-pulse">運算中…</div> : (
+                                        <div className="animate-fade-in font-mono">
+                                            <div className="data-row"><span className="data-label">總市值</span><span className="data-value text-white">{aiData?.market?.marketCap || '---'}</span></div>
+                                            <div className="data-row"><span className="data-label">本益比 (PE)</span><span className="data-value text-yellow-400">{fmtUnit(aiData?.market?.pe, ' 倍')}</span></div>
+                                            <div className="data-row"><span className="data-label">殖利率</span><span className="data-value text-white">{fmtUnit(aiData?.market?.yield, '%')}</span></div>
+                                            <div className="data-row"><span className="data-label">股淨比 (PB)</span><span className="data-value text-white">{fmtUnit(aiData?.market?.pb, ' 倍')}</span></div>
                                         </div>
-                                    ))}
+                                    )}
                                 </div>
                             </div>
                         </div>
@@ -807,11 +779,15 @@
                             {/* 總體聯動 (移到最上方) */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-cyan-950/20 border-b border-gray-800 p-1.5 px-2">
-                                    <span className="text-cyan-400 font-bold text-[10px] uppercase">總體聯動</span>
+                                    <span className="text-cyan-400 font-bold text-[10px] uppercase">總體聯動 (AI 判讀)</span>
                                 </div>
-                                <div className="p-2 text-[10px] lg:text-xs space-y-1 font-mono">
-                                    <div className="flex justify-between border-b border-gray-800 pb-0.5"><span className="text-gray-500">大盤狀態 (加權)</span><span className="text-white truncate max-w-[120px] text-right">{aiData?.market?.taiex || '---'}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-500">費半狀態 (SOX)</span><span className="text-white truncate max-w-[120px] text-right">{aiData?.market?.sox || '---'}</span></div>
+                                <div className="p-2 text-[10px] lg:text-xs">
+                                     {isAiLoading ? <div className="text-center text-gray-500 py-1 animate-pulse">運算中…</div> : (
+                                        <div className="animate-fade-in space-y-1">
+                                            <div className="data-row"><span className="data-label">大盤狀態 (加權)</span><span className="data-value text-white truncate max-w-[120px]" title={aiData?.market?.taiex}>{aiData?.market?.taiex || '---'}</span></div>
+                                            <div className="data-row"><span className="data-label">費半狀態 (SOX)</span><span className="data-value text-white truncate max-w-[120px]" title={aiData?.market?.sox}>{aiData?.market?.sox || '---'}</span></div>
+                                        </div>
+                                     )}
                                 </div>
                             </div>
 
@@ -819,7 +795,7 @@
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-[#1a1500] border-b border-gray-800 p-1.5 px-2 flex justify-between items-center cursor-pointer hover:bg-[#2a2200] transition-colors" onClick={() => setIsWatchlistExpanded(!isWatchlistExpanded)}>
                                     <span className="text-yellow-500 font-bold text-[10px] lg:text-xs tracking-widest uppercase">自選追蹤清單</span>
-                                    <span className="text-gray-500 text-[10px]" style={{ transform: isWatchlistExpanded ? 'rotate(0deg)' : 'rotate(180deg)' }}>▲</span>
+                                    <span className="text-gray-500 text-[10px] transition-transform duration-300" style={{ transform: isWatchlistExpanded ? 'rotate(0deg)' : 'rotate(180deg)' }}>▲</span>
                                 </div>
                                 <div className={`transition-all duration-300 ease-in-out overflow-hidden ${isWatchlistExpanded ? 'max-h-[250px] opacity-100' : 'max-h-0 opacity-0'}`}>
                                     <div className="p-1 flex flex-col gap-1 overflow-y-auto custom-scrollbar" style={{ maxHeight: '200px' }}>
@@ -849,36 +825,46 @@
                                 <div className="bg-orange-950/20 border-b border-gray-800 p-1.5 px-2 flex justify-between items-center">
                                     <span className="text-orange-400 font-bold text-[10px] uppercase">AI 戰略矩陣</span>
                                     {aiData?.strategy?.score != null && (
-                                        <span className="text-white font-black text-xs lg:text-sm">{aiData.strategy.score} 分</span>
+                                        <span className="text-white font-black text-xs lg:text-sm animate-fade-in">{aiData.strategy.score} 分</span>
                                     )}
                                 </div>
-                                <div className="p-2 text-[10px] lg:text-xs text-gray-300 leading-relaxed min-h-[40px]">
-                                    {isAiLoading ? <span className="text-gray-500 animate-pulse">分析中…</span> : (aiData?.strategy?.conclusion || <span className="text-gray-600">等待數據…</span>)}
+                                <div className="p-2 text-[10px] lg:text-xs text-gray-300 min-h-[40px] flex items-center">
+                                    {isAiLoading ? <span className="text-gray-500 animate-pulse">分析中…</span> : (
+                                        <span className="font-bold animate-fade-in">{aiData?.strategy?.conclusion || <span className="text-gray-600">等待數據…</span>}</span>
+                                    )}
                                 </div>
                             </div>
 
-                            {/* AI 健檢分析 (新增) */}
+                            {/* AI 健檢分析 */}
                             <div className="panel-card bg-[#050505] flex-none border border-green-900/30">
                                 <div className="bg-green-950/20 border-b border-gray-800 p-1.5 px-2 flex justify-between items-center">
                                     <span className="text-green-400 font-bold text-[10px] uppercase">AI 健檢分析</span>
                                     {aiData?.health_check?.score != null && (
-                                        <div className={`px-1.5 py-0.5 rounded text-[10px] font-black ${aiData.health_check.score >= 70 ? 'bg-green-900/50 text-green-400' : aiData.health_check.score >= 40 ? 'bg-yellow-900/50 text-yellow-400' : 'bg-red-900/50 text-red-400'}`}>
+                                        <div className={`px-1.5 py-0.5 rounded text-[10px] font-black animate-fade-in ${aiData.health_check.score >= 70 ? 'bg-green-900/50 text-green-400' : aiData.health_check.score >= 40 ? 'bg-yellow-900/50 text-yellow-400' : 'bg-red-900/50 text-red-400'}`}>
                                             體質: {aiData.health_check.score}
                                         </div>
                                     )}
                                 </div>
-                                <div className="p-2 text-[10px] lg:text-xs text-gray-300 leading-relaxed italic">
-                                    {isAiLoading ? <span className="text-gray-500 animate-pulse">體檢中…</span> : (aiData?.health_check?.comment || <span className="text-gray-600">等待評估…</span>)}
+                                <div className="p-2 text-[10px] lg:text-xs text-gray-300 italic">
+                                    {isAiLoading ? <span className="text-gray-500 animate-pulse">體檢中…</span> : (
+                                        <div className="animate-fade-in line-clamp-3" title={aiData?.health_check?.comment}>
+                                            {aiData?.health_check?.comment || <span className="text-gray-600">等待評估…</span>}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 
-                            {/* AI 盤前開盤分析 */}
+                            {/* AI 盤前開盤分析 (修剪文字量) */}
                             <div className="panel-card bg-[#050505] flex-1 flex flex-col">
                                 <div className="bg-blue-950/20 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-blue-400 font-bold text-[10px] uppercase">AI 盤前開盤分析</span>
                                 </div>
                                 <div className="p-2 text-[10px] lg:text-xs text-gray-300 leading-relaxed overflow-y-auto custom-scrollbar flex-1 text-justify">
-                                    {isAiLoading ? <span className="text-gray-500 animate-pulse">撰寫報告中…</span> : (aiData?.prediction?.open_analysis || <span className="text-gray-600">等待模型輸出…</span>)}
+                                    {isAiLoading ? <span className="text-gray-500 animate-pulse">撰寫報告中…</span> : (
+                                        <div className="animate-fade-in whitespace-pre-wrap">
+                                            {aiData?.prediction?.open_analysis || <span className="text-gray-600">等待模型輸出…</span>}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         </div>
