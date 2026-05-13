@@ -34,7 +34,6 @@
         .predict-panel { border: 1px solid rgba(220, 38, 38, 0.4); animation: pulseBorder 3s infinite ease-in-out; }
         .chips-panel { border: 1px solid rgba(234, 179, 8, 0.4); }
 
-        /* 響應式排版微調 */
         @media (max-width: 1400px) {
             .responsive-text-sm { font-size: 0.65rem; }
             .responsive-text-base { font-size: 0.75rem; }
@@ -82,30 +81,15 @@
         const fmtVol     = v => (v == null || isNaN(+v)) ? '0' : Math.round(+v).toLocaleString('en-US');
         const fmtUnit    = (val, unit) => (val == null || val === '---' || val === '') ? '---' : `${val}${unit}`;
 
-        // ============================================================================
-        // 階段二實作：本機數學統計模型 (Local Math Engine)
-        // ============================================================================
         const MathPredictor = {
             forecast: (history, livePrice, atr) => {
                 if (!history || history.length < 5 || !livePrice || !atr) return null;
-                
-                // 1. 計算近期動能 (Momentum)
                 const closes = history.slice(-5).map(d => d.close);
                 const momentum = (livePrice - closes[0]) / closes[0];
-                
-                // 2. 趨勢加權計算期望值 (Expected Value)
-                // 假設明日價格會順應動能，但受到均值回歸牽制
                 let expectedPrice = livePrice * (1 + (momentum * 0.3)); 
-                
-                // 3. 信賴區間 (利用 ATR)
-                // 樂觀/悲觀預期不超過 1.5 倍 ATR
                 const upperLimit = livePrice + (atr * 1.5);
                 const lowerLimit = livePrice - (atr * 1.5);
-
-                // 約束期望值不超過極限
                 expectedPrice = Math.min(Math.max(expectedPrice, lowerLimit), upperLimit);
-
-                // 計算開盤與收盤預期 (模擬日內震盪)
                 const expectedOpen = livePrice + ((expectedPrice - livePrice) * 0.4);
 
                 return {
@@ -260,7 +244,7 @@
             
             const [aiData,       setAiData]       = useState(null);
             const [techFeatures, setTechFeatures] = useState(null);
-            const [mathPrediction, setMathPrediction] = useState(null); // 階段二：本機數學預測結果
+            const [mathPrediction, setMathPrediction] = useState(null); 
             const [techVersion,  setTechVersion]  = useState(0);
             
             const [isChartLoading, setIsChartLoading] = useState(false);
@@ -440,7 +424,6 @@
                 };
                 setTechFeatures(newFeatures);
 
-                // 階段二：觸發本機數學運算
                 if (liveQuote.price && latest.atr) {
                      const prediction = MathPredictor.forecast(chartData, Number(liveQuote.price), latest.atr);
                      setMathPrediction(prediction);
@@ -483,8 +466,24 @@
                     isTwseDone = true;
                     if (q && q.price !== null) {
                         if (q.name) setCurrentName(q.name);
-                        const { name, ...quote } = q;
-                        setLiveQuote(prev => ({ ...prev, ...quote }));
+                        
+                        // 修復：嚴格計算漲跌幅，確保不會出現 --- 和 0.00
+                        let finalChange = q.change;
+                        let finalPercent = q.percent;
+                        
+                        if (q.change === null || isNaN(q.change) || q.price === 0) {
+                             finalChange = 0;
+                             finalPercent = 0;
+                        }
+                        
+                        const updatedQuote = { 
+                            ...q, 
+                            change: finalChange,
+                            percent: finalPercent,
+                            status: 'live' 
+                        };
+                        
+                        setLiveQuote(prev => ({ ...prev, ...updatedQuote }));
                     }
                 });
 
@@ -494,12 +493,20 @@
                         setHistory(rows);
                         if (!isTwseDone) {
                             const last = rows[rows.length - 1];
+                            const prevLast = rows.length > 1 ? rows[rows.length - 2] : last;
+                            
+                            // 修復：使用歷史資料做備援時，確實計算假漲跌幅
+                            const fallbackPrice = last.close;
+                            const fallbackPrevClose = prevLast.close;
+                            const fallbackChange = fallbackPrice - fallbackPrevClose;
+                            const fallbackPercent = fallbackPrevClose ? (fallbackChange / fallbackPrevClose) * 100 : 0;
+                            
                             setLiveQuote(prev => {
-                                if (prev.price === null) {
+                                if (prev.price === null || prev.status === 'error') {
                                     return { 
                                         ...prev, 
-                                        price: last.close, open: last.open, high: last.high, low: last.low, volume: last.volume,
-                                        change: 0, percent: 0, status: 'fallback' 
+                                        price: fallbackPrice, open: last.open, high: last.high, low: last.low, volume: last.volume,
+                                        change: fallbackChange, percent: fallbackPercent, status: 'fallback' 
                                     };
                                 }
                                 return prev;
@@ -517,7 +524,6 @@
 
             }, [stockId, destroyCharts]);
 
-            // 階段二：混合推論引擎 (Hybrid AI)
             useEffect(() => {
                 if (!techFeatures || !customKey || !liveQuote.price || !mathPrediction) return;
                 const gen = fetchGen.current;
@@ -539,16 +545,18 @@
 
 【技術特徵】
 波動率 ATR(14): ${techFeatures.atr}, 動能 RSI(14): ${techFeatures.rsi}, MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}。
+今日量能: ${liveQuote.volume}
 
 任務：
 1. 根據技術特徵，給出上漲、盤整、下跌的機率分配（整數，總和100）。
 2. 撰寫「盤前開盤分析 (open_analysis)」：要求極短句，精簡點出高開或低開的應對策略。
 3. 推估「基本面與總體經濟 (market)」：包含大盤狀態(taiex)、費半(sox)、市值(marketCap, 必須有億/兆單位)、本益比(pe, 純數字)、殖利率(yield, 帶%)。
 4. 推估「籌碼動向 (chips)」：簡短描述主力與法人動向，並給 0~100 多空指標。
-5. 生成「戰略矩陣 (strategy)」：1-100分，極短操作結論。
-6. 健檢分析 (health_check): 1-100分，極短體質點評。
-7. 只能輸出純 JSON，嚴禁 Markdown。
-格式：{"prob":{"up":0,"flat":0,"down":0},"open_analysis":"","market":{"taiex":"","sox":"","marketCap":"","pe":"","yield":""},"chips":{"big_player":"","institution":"","retail":"","bull_bear_index":0},"strategy":{"score":0,"conclusion":""},"health_check":{"score":0,"comment":""}}`;
+5. 推估「成交深度分析 (volume_profile)」: 根據今日量能與型態，判斷關鍵壓力與支撐。
+6. 生成「戰略矩陣 (strategy)」：1-100分，極短操作結論。
+7. 健檢分析 (health_check): 1-100分，極短體質點評。
+8. 只能輸出純 JSON，嚴禁 Markdown。
+格式：{"prob":{"up":0,"flat":0,"down":0},"open_analysis":"","volume_profile":"","market":{"taiex":"","sox":"","marketCap":"","pe":"","yield":""},"chips":{"big_player":"","institution":"","retail":"","bull_bear_index":0},"strategy":{"score":0,"conclusion":""},"health_check":{"score":0,"comment":""}}`;
 
                         const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
                             method: 'POST',
@@ -634,7 +642,7 @@
                         <div className="flex gap-2 items-center">
                             {isChartLoading && <span className="responsive-text-sm text-gray-500 animate-pulse hidden sm:inline">資料載入中…</span>}
                             <button onClick={toggleWatchlist} className={`px-2 py-1 responsive-text-sm font-bold rounded transition-colors border hidden sm:block ${isWatched ? 'bg-yellow-900/40 border-yellow-700 text-yellow-300' : 'bg-gray-800 border-gray-600 text-gray-400 hover:bg-gray-700 hover:text-white'}`}>
-                                {isWatched ? '取消追蹤' : '加入追蹤'}
+                                {isWatched ? '加入追蹤' : '取消追蹤'}
                             </button>
                             <input
                                 type="text" value={inputValue}
@@ -872,6 +880,19 @@
                                     {isAiLoading ? <span className="text-gray-500 animate-pulse">體檢中…</span> : (
                                         <div className="animate-fade-in line-clamp-2" title={aiData?.health_check?.comment}>
                                             {aiData?.health_check?.comment || <span className="text-gray-600">等待評估…</span>}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="panel-card bg-[#050505] flex-none border border-purple-900/30">
+                                <div className="bg-purple-950/20 border-b border-gray-800 p-1.5 px-2">
+                                    <span className="text-purple-400 font-bold text-[10px] uppercase">AI 成交深度解析</span>
+                                </div>
+                                <div className="p-2 text-[10px] lg:text-xs text-gray-300 leading-relaxed overflow-y-auto custom-scrollbar flex-1 text-justify">
+                                    {isAiLoading ? <span className="text-gray-500 animate-pulse">解析量能結構中…</span> : (
+                                        <div className="animate-fade-in whitespace-pre-wrap">
+                                            {aiData?.volume_profile || <span className="text-gray-600">等待模型輸出…</span>}
                                         </div>
                                     )}
                                 </div>
