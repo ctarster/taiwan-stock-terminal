@@ -22,7 +22,7 @@
         .panel-card { background-color: #050505; border: 1px solid rgba(255,255,255,0.06); border-radius: 0.25rem; }
         .predict-panel { border: 1px solid rgba(220, 38, 38, 0.4); animation: pulseBorder 3s infinite ease-in-out; }
         
-        /* 響應式字體大小與間距調整 */
+        /* 響應式字體大小調整 */
         @media (max-width: 1400px) {
             .responsive-text-sm { font-size: 0.7rem; }
             .responsive-text-base { font-size: 0.8rem; }
@@ -56,6 +56,7 @@
             '2603': '長榮', '2308': '台達電', '2382': '廣達', '3231': '緯創',
             '2356': '英業達', '2618': '陽明', '2615': '萬海', '2412': '中華電'
         };
+
         const getStockName = (id) => STOCK_NAMES[id] || id;
 
         const safeNum = (val, fallback = 0) => {
@@ -147,8 +148,8 @@
             const safeUrl = url.includes('?') ? `${url}&${cb}` : `${url}?${cb}`;
             
             const proxies = [
-                { url: `https://api.allorigins.win/raw?url=${encodeURIComponent(safeUrl)}`, isWrapper: false },
-                { url: `https://api.codetabs.com/v1/proxy?quest=${safeUrl}`, isWrapper: false }
+                { url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(safeUrl)}`, isWrapper: false },
+                { url: `https://api.allorigins.win/raw?url=${encodeURIComponent(safeUrl)}`, isWrapper: false }
             ];
 
             const controllers = proxies.map(() => new AbortController());
@@ -221,7 +222,7 @@
                     }));
                 }
             } catch (e) {
-                console.warn("FinMind 歷史資料獲取失敗");
+                console.warn("FinMind 歷史資料獲取失敗", e);
             }
             return [];
         };
@@ -239,6 +240,18 @@
             const [inputValue,   setInputValue]   = useState('');
             const [customKey,    setCustomKey]    = useState(() => (localStorage.getItem('api_key_groq') || '').trim());
             
+            // Watchlist States
+            const [watchlist, setWatchlist] = useState(() => {
+                const saved = localStorage.getItem('quant_watchlist');
+                return saved ? JSON.parse(saved) : [
+                    { id: '2330', name: '台積電' },
+                    { id: '3481', name: '群創' },
+                    { id: '2317', name: '鴻海' }
+                ];
+            });
+            const [isWatchlistExpanded, setIsWatchlistExpanded] = useState(true);
+            const [watchlistQuotes, setWatchlistQuotes] = useState({});
+
             const [liveQuote,    setLiveQuote]    = useState(emptyQuote('3481'));
             const [history,      setHistory]      = useState([]);
             const [aiData,       setAiData]       = useState(null);
@@ -257,6 +270,53 @@
             const seriesRefs    = useRef({});
             const chartInited   = useRef(false);
             const fetchGen      = useRef(0);
+
+            // Fetch background quotes for watchlist
+            useEffect(() => {
+                let isActive = true;
+                const updateWatchlist = async () => {
+                    if (watchlist.length === 0) return;
+                    for (const item of watchlist) {
+                        if (!isActive) break;
+                        try {
+                            const data = await fetchTWSE_RealTime(item.id);
+                            if (data && data.price) {
+                                setWatchlistQuotes(prev => ({
+                                    ...prev,
+                                    [item.id]: data
+                                }));
+                            }
+                        } catch(e){}
+                        // brief delay to avoid rate limiting
+                        await new Promise(r => setTimeout(r, 200));
+                    }
+                };
+                updateWatchlist();
+                const interval = setInterval(updateWatchlist, 15000); // 15 seconds
+                return () => { isActive = false; clearInterval(interval); };
+            }, [watchlist]);
+
+            const toggleWatchlist = () => {
+                setWatchlist(prev => {
+                    const exists = prev.find(item => item.id === stockId);
+                    let newList;
+                    if (exists) {
+                        newList = prev.filter(item => item.id !== stockId);
+                    } else {
+                        newList = [...prev, { id: stockId, name: currentName }];
+                    }
+                    localStorage.setItem('quant_watchlist', JSON.stringify(newList));
+                    return newList;
+                });
+            }
+            const isWatched = watchlist.some(item => item.id === stockId);
+
+            const handleWatchlistClick = (id) => {
+                if (id !== stockId) {
+                    setStockId(id);
+                    setInputValue('');
+                }
+            };
 
             const destroyCharts = useCallback(() => {
                 Object.values(chartRefs.current).forEach(c => { try { c.remove(); } catch {} });
@@ -318,7 +378,6 @@
             const chartDataToRender = useMemo(() => {
                 if (!history || history.length === 0) return [];
                 
-                // 去重
                 const sorted = [...history].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
                 const uniqueHistory = [];
                 const seen = new Set();
@@ -478,30 +537,31 @@
                     setAiData(null);
                     try {
                         const prompt = `你是一名頂級機構的量化交易工程師與總經分析師。
-請根據以下參數，並調用你龐大的財經知識庫，針對台股 [${stockId} ${currentName}] 進行全面性的量化預測、基本面與籌碼面評估。
+請根據以下參數，並調用你龐大的財經知識庫，針對台股 [${stockId} ${currentName}] 進行全面性的量化預測與籌碼面推算。
 
 【當前技術特徵】
 現價: ${liveQuote.price}, 波動率 ATR(14): ${techFeatures.atr}, 動能 RSI(14): ${techFeatures.rsi}
 MACD DIF: ${techFeatures.macd.dif}, KDJ J值: ${techFeatures.kdj.j}
 
 【分析任務指示】
-1. **價格預測：** 根據波動率與動能，計算明日的「預估開盤價」與「預估收盤價」（小數點兩位）。
-2. **機率分佈：** 給出明日上漲、盤整、下跌的機率（整數，總和100）。
+1. **價格預測：** 根據波動率與動能，推算明日的「預估開盤價」與「預估收盤價」（必須是數字，小數點兩位）。
+2. **機率分佈：** 給出明日上漲、盤整、下跌的機率（整數，總和為100）。
 3. **操作目標：** 設定防守的第一停利目標價 (TP1) 與嚴格停損價 (SL)。
-4. **戰略決策：** 綜合評估後，給予這檔股票一個整體戰略分數 (1-100) 與明確操作結論 (如: 強力買進、逢高減碼、嚴守停損)。
-5. **總體與基本面：** 調用知識庫，給出大盤(加權)與費半(SOX)的狀態推估，以及該公司的市值、殖利率、股淨比、本益比推估。
-6. **籌碼與多空結構推估：** 調用知識庫與當前價量狀態，推估「主力(Main)」、「機構(Institution)」、「散戶(Retail)」目前的籌碼動向(短語描述，如: 積極買進、獲利了結、套牢恐慌等)，以及整體的「多空情緒比例」(Sentiment，0-100，大於50為偏多)。
-7. **專業盤前開盤分析報告：** (150-200字) 融合技術面、籌碼流向、近期產業動態(如財報、供應鏈)撰寫專業報告。需包含：短線強弱評估、明日「高開」或「低開」的具體機率與理由、以及明確的早盤應對策略。
+4. **戰略決策：** 綜合評估後，給予這檔股票一個整體戰略分數 (1-100) 與明確的操作結論 (如: 強力買進、逢高減碼、嚴守停損)。
+5. **總體聯動推算：** 調用知識庫，給出近期「加權指數(大盤)」與「費半指數(SOX)」的推估數值或趨勢狀態 (如: 17500, 或 偏多)。
+6. **基本面與估值填補：** 調用知識庫，給出該公司的「預估本益比」、「殖利率區間」、「股淨比推估」與市值規模判斷。
+7. **籌碼與多空情緒推估 (AI推算)：** 請依據目前的線型特徵與你對此檔股票的認知，合理推算當前「主力」、「法人機構」、「散戶」的操作動向 (例如：外資連買、主力洗盤、散戶套牢等簡短描述)，並給出 0~100 的「多空情緒指標 (0極度看空, 100極度看多)」。
+8. **專業盤前開盤分析報告 (字數150-200字)：** 結合技術面與可能的產業動態，撰寫長篇盤前報告。必須包含：明日「高開低走」或「低開高走」的具體情境推演、壓力支撐區的測試可能、以及早盤應對策略。
 
 【格式限制】
-只能輸出純 JSON，嚴禁 markdown，禁止任何解釋文字。
+只能輸出純 JSON，嚴禁 markdown 或解釋文字。
 JSON 結構：
 {
-  "prediction": { "open": "數字", "close": "數字", "prob": { "up": 0, "flat": 0, "down": 0 }, "targets": { "tp1": "數字", "sl": "數字" }, "open_analysis": "專業的長篇分析報告" },
+  "prediction": { "open": 0.0, "close": 0.0, "prob": { "up": 0, "flat": 0, "down": 0 }, "targets": { "tp1": 0.0, "sl": 0.0 }, "open_analysis": "報告內容..." },
   "strategy": { "score": 0, "conclusion": "明確操作結論" },
-  "market": { "taiex": "狀態推估", "sox": "狀態推估" },
+  "market": { "taiex": "推估大盤", "sox": "推估費半" },
   "fundamentals": { "marketCap": "市值", "yield": "殖利率", "pb": "股淨比", "pe": "本益比", "forwardPE": "預估本益比" },
-  "chips": { "main": "主力動向描述", "institution": "機構動向描述", "retail": "散戶動向描述", "sentiment": 50 }
+  "sentiment": { "big_player": "主力動向", "institution": "機構動向", "retail": "散戶動向", "bull_bear_index": 0 }
 }`;
 
                         const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
@@ -510,7 +570,7 @@ JSON 結構：
                             body: JSON.stringify({
                                 model: DEFAULT_GROQ_MODEL,
                                 messages: [
-                                    { role: 'system', content: 'You are a quantitative analyst. Output strictly valid JSON matching the schema.' },
+                                    { role: 'system', content: 'You only output valid JSON.' },
                                     { role: 'user', content: prompt }
                                 ],
                                 response_format: { type: 'json_object' }
@@ -541,14 +601,13 @@ JSON 結構：
                             }
                         }
                     } catch (e) {
-                        if (!cancelled) setStatusMsg(`AI 分析失敗：${e.message}`);
+                        if (!cancelled) setStatusMsg(`分析失敗：${e.message}`);
                     } finally {
                         if (!cancelled) setIsAiLoading(false);
                     }
                 };
                 run();
                 return () => { cancelled = true; };
-            // eslint-disable-next-line react-hooks/exhaustive-deps
             }, [techVersion, customKey]);
 
             const handleSearch = () => {
@@ -574,6 +633,7 @@ JSON 結構：
 
             return (
                 <div className="min-h-screen bg-[#030303] text-gray-200 font-sans p-2 flex flex-col" style={{ height: '100vh' }}>
+                    {/* Header */}
                     <header className="flex-none flex justify-between items-center mb-2 bg-[#0a0a0a] header-padding border border-gray-800 rounded">
                         <div className="flex items-center gap-4">
                             <h1 className="responsive-text-xl font-bold text-white tracking-tighter">
@@ -590,7 +650,17 @@ JSON 結構：
                             </div>
                         </div>
                         <div className="flex gap-2 items-center">
-                            {isChartLoading && <span className="responsive-text-sm text-gray-500 animate-pulse hidden sm:inline">圖表載入中…</span>}
+                            {isChartLoading && <span className="responsive-text-sm text-gray-500 animate-pulse hidden sm:inline">資料載入中…</span>}
+                            <button
+                                onClick={toggleWatchlist}
+                                className={`border px-3 py-1.5 responsive-text-sm font-bold rounded transition-colors hidden md:block ${
+                                    isWatched
+                                        ? 'bg-yellow-900/40 border-yellow-700 text-yellow-500 hover:bg-yellow-900/60'
+                                        : 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700'
+                                }`}
+                            >
+                                {isWatched ? '★ 已追蹤' : '☆ 加入追蹤'}
+                            </button>
                             <input
                                 type="text" value={inputValue}
                                 onChange={e => setInputValue(e.target.value)}
@@ -610,7 +680,7 @@ JSON 結構：
                     {showSettings && (
                         <div ref={settingsRef} className="absolute top-16 right-4 z-[100] w-80 p-5 glass-panel rounded shadow-2xl">
                             <h3 className="text-xs font-bold text-blue-400 mb-3 uppercase tracking-widest">Groq API 配置</h3>
-                            <p className="text-[10px] text-gray-500 mb-2">免費申請：console.groq.com</p>
+                            <p className="text-[10px] text-gray-500 mb-2">請使用 llama-3.3-70b 模型相容金鑰</p>
                             <input
                                 type="password" value={customKey}
                                 onChange={e => setCustomKey(e.target.value)}
@@ -642,7 +712,7 @@ JSON 結構：
                                 {!customKey ? (
                                     <div className="text-center py-4 text-gray-500 responsive-text-sm">請先設定 Groq API 金鑰</div>
                                 ) : isAiLoading ? (
-                                    <div className="text-center py-4 text-red-400 responsive-text-sm animate-pulse">模型推理與生成中…</div>
+                                    <div className="text-center py-4 text-red-400 responsive-text-sm animate-pulse">模型推理與基本面生成中…</div>
                                 ) : (
                                     <>
                                         <div className="flex justify-between gap-2">
@@ -682,6 +752,36 @@ JSON 結構：
                                 )}
                             </div>
 
+                            {/* 籌碼與多空情緒 (新增) */}
+                            <div className="panel-card bg-[#050505] flex-none">
+                                <div className="bg-pink-950/20 border-b border-gray-800 panel-padding">
+                                    <span className="text-pink-400 font-bold responsive-text-sm tracking-widest uppercase">籌碼與多空 (AI 推估)</span>
+                                </div>
+                                <div className="panel-padding space-y-2 responsive-text-sm">
+                                    <div className="flex justify-between items-center border-b border-gray-800 pb-1">
+                                        <span className="text-gray-500">主力動向</span>
+                                        <span className="text-white font-bold">{aiData?.sentiment?.big_player || '---'}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center border-b border-gray-800 pb-1">
+                                        <span className="text-gray-500">法人機構</span>
+                                        <span className="text-blue-400 font-bold">{aiData?.sentiment?.institution || '---'}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center border-b border-gray-800 pb-1">
+                                        <span className="text-gray-500">散戶動向</span>
+                                        <span className="text-gray-300">{aiData?.sentiment?.retail || '---'}</span>
+                                    </div>
+                                    <div className="mt-2 bg-gray-900/50 p-2 rounded">
+                                        <div className="flex justify-between mb-1">
+                                            <span className="text-gray-400">多空情緒指標</span>
+                                            <span className="text-white font-black">{aiData?.sentiment?.bull_bear_index || 50} / 100</span>
+                                        </div>
+                                        <div className="h-1.5 w-full bg-gray-800 rounded flex overflow-hidden">
+                                            <div style={{ width: `${aiData?.sentiment?.bull_bear_index || 50}%` }} className="bg-pink-500 transition-all duration-1000"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
                             {/* 技術特徵 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-blue-950/20 border-b border-gray-800 panel-padding">
@@ -702,37 +802,8 @@ JSON 結構：
                                 </div>
                             </div>
 
-                            {/* 籌碼與多空動態 - AI 推算 */}
-                            <div className="panel-card bg-[#050505] flex-none">
-                                <div className="bg-pink-950/20 border-b border-gray-800 panel-padding">
-                                    <span className="text-pink-400 font-bold responsive-text-sm tracking-widest uppercase">籌碼與多空 (AI 推估)</span>
-                                </div>
-                                <div className="panel-padding space-y-2 responsive-text-sm font-mono">
-                                    {[
-                                        ['主力動向', aiData?.chips?.main || '---', 'text-white'],
-                                        ['機構法人', aiData?.chips?.institution || '---', 'text-yellow-400'],
-                                        ['散戶狀態', aiData?.chips?.retail || '---', 'text-green-400']
-                                    ].map(([label, val, cls]) => (
-                                        <div key={label} className="flex justify-between border-b border-gray-800 pb-1">
-                                            <span className="text-gray-500">{label}</span>
-                                            <span className={cls}>{val}</span>
-                                        </div>
-                                    ))}
-                                    <div className="pt-1">
-                                        <div className="flex justify-between responsive-text-sm mb-1">
-                                            <span className="text-gray-400">多空情緒 (Sentiment)</span>
-                                            <span className={aiData?.chips?.sentiment > 50 ? 'text-red-400' : 'text-green-400'}>{aiData?.chips?.sentiment || 50}</span>
-                                        </div>
-                                        <div className="h-1.5 w-full bg-gray-800 rounded flex overflow-hidden">
-                                            <div style={{ width: `${aiData?.chips?.sentiment || 50}%` }} className="bg-red-500 transition-all duration-700"></div>
-                                            <div style={{ width: `${100 - (aiData?.chips?.sentiment || 50)}%` }} className="bg-green-500 transition-all duration-700"></div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
                             {/* 基本面 - AI 驅動 */}
-                            <div className="panel-card bg-[#050505] flex-1 min-h-0 flex flex-col">
+                            <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-slate-900/40 border-b border-gray-800 panel-padding flex-none">
                                     <span className="text-gray-300 font-bold responsive-text-sm tracking-widest uppercase">基本面與估值 (AI 推算)</span>
                                 </div>
@@ -773,6 +844,50 @@ JSON 結構：
 
                         {/* 右側面板 */}
                         <div className="col-span-12 md:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pl-1 min-h-0">
+                            
+                            {/* 自選追蹤清單 */}
+                            <div className="panel-card bg-[#050505] flex-none">
+                                <div
+                                    className="bg-yellow-950/20 border-b border-gray-800 panel-padding flex justify-between items-center cursor-pointer select-none"
+                                    onClick={() => setIsWatchlistExpanded(!isWatchlistExpanded)}
+                                >
+                                    <span className="text-yellow-400 font-bold responsive-text-sm uppercase">自選追蹤清單</span>
+                                    <span className="text-gray-500 transform transition-transform duration-300" style={{ transform: isWatchlistExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>▼</span>
+                                </div>
+                                <div className={`transition-all duration-300 overflow-hidden ${isWatchlistExpanded ? 'max-h-60' : 'max-h-0'}`}>
+                                    <div className="p-2 space-y-1 overflow-y-auto custom-scrollbar" style={{ maxHeight: '240px' }}>
+                                        {watchlist.length === 0 ? (
+                                            <div className="text-center text-gray-600 text-[10px] py-2">無追蹤標的</div>
+                                        ) : (
+                                            watchlist.map(item => {
+                                                const quote = watchlistQuotes[item.id];
+                                                const isWUp = quote?.change >= 0;
+                                                return (
+                                                    <div 
+                                                        key={item.id} 
+                                                        onClick={() => handleWatchlistClick(item.id)} 
+                                                        className={`flex justify-between items-center p-2 rounded border transition-colors cursor-pointer ${stockId === item.id ? 'bg-gray-800 border-gray-600' : 'bg-gray-900/40 border-gray-800 hover:bg-gray-800'}`}
+                                                    >
+                                                        <div className="flex flex-col">
+                                                            <span className="text-white font-bold responsive-text-sm">{item.name}</span>
+                                                            <span className="text-gray-500 text-[10px] font-mono">{item.id}</span>
+                                                        </div>
+                                                        <div className="flex flex-col items-end">
+                                                            <span className={`font-mono responsive-text-sm font-bold ${quote ? (isWUp ? 'text-red-500' : 'text-green-500') : 'text-gray-500'}`}>
+                                                                {quote ? fmtPrice(quote.price) : '---'}
+                                                            </span>
+                                                            <span className={`font-mono text-[10px] ${quote ? (isWUp ? 'text-red-500' : 'text-green-500') : 'text-gray-500'}`}>
+                                                                {quote ? fmtPct(quote.percent) : '---'}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                )
+                                            })
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
                             {/* AI 戰略矩陣 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-orange-950/20 border-b border-gray-800 panel-padding flex justify-between items-center">
@@ -783,7 +898,7 @@ JSON 結構：
                                 </div>
                                 <div className="panel-padding responsive-text-sm font-bold text-white leading-relaxed text-center py-3">
                                     {isAiLoading ? (
-                                        <span className="text-gray-500 animate-pulse font-normal">運算中…</span>
+                                        <span className="text-gray-500 animate-pulse font-normal">計算中…</span>
                                     ) : aiData?.strategy?.conclusion ? (
                                         aiData.strategy.conclusion
                                     ) : (
@@ -827,7 +942,7 @@ JSON 結構：
                             </div>
 
                             {/* 指標說明 */}
-                            <div className="panel-card bg-[#050505] flex-none hidden md:block">
+                            <div className="panel-card bg-[#050505] flex-none hidden lg:block">
                                 <div className="bg-gray-900/40 border-b border-gray-800 panel-padding">
                                     <span className="text-gray-500 font-bold responsive-text-sm uppercase">圖例</span>
                                 </div>
