@@ -335,15 +335,20 @@
                 if (!el || el.clientWidth === 0) return;
 
                 const w = el.clientWidth;
+                // 新增：強制固定右側價格軸寬度，確保所有圖表的 X 軸能完美垂直對齊
+                const PRICE_SCALE_WIDTH = 55; 
+
                 const base = {
                     width: w,
                     layout: { background: { color: 'transparent' }, textColor: '#9ca3af', fontSize: 11 },
                     grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } },
-                    rightPriceScale: { borderColor: '#374151' },
+                    // 修改：強制指定 minWidth 避免圖表因數值長度不同而錯位
+                    rightPriceScale: { borderColor: '#374151', minWidth: PRICE_SCALE_WIDTH },
                     crosshair: { mode: 0 },
                     handleScroll: true, handleScale: true
                 };
 
+                // 修改：只保留 K 線圖顯示底部時間標籤，附圖全部隱藏以節省空間並避免干擾
                 const kChart = window.LightweightCharts.createChart(containerRefs.kline.current, { ...base, timeScale: { borderColor: '#374151', fixRightEdge: true } });
                 const kSeries   = kChart.addCandlestickSeries({ upColor: '#ef4444', downColor: '#22c55e', borderVisible: false, wickUpColor: '#ef4444', wickDownColor: '#22c55e' });
                 const ma5Series = kChart.addLineSeries({ color: '#facc15', lineWidth: 1.5, crosshairMarkerVisible: false });
@@ -366,9 +371,42 @@
                 seriesRefs.current  = { kSeries, ma5Series, ma20Series, vSeries, mDif, mDea, mHist, kjK, kjD, kjJ };
                 chartInited.current = true;
 
-                kChart.timeScale().subscribeVisibleLogicalRangeChange(r => {
-                    if (r) [vChart, mChart, kjChart].forEach(c => c.timeScale().setVisibleLogicalRange(r));
+                // 新增：強化時間軸可見範圍的雙向綁定同步
+                let isSyncing = false;
+                const charts = [kChart, vChart, mChart, kjChart];
+                
+                charts.forEach((chart, index) => {
+                    chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+                        if (!range || isSyncing) return;
+                        isSyncing = true;
+                        charts.forEach((otherChart, otherIndex) => {
+                            if (index !== otherIndex) {
+                                otherChart.timeScale().setVisibleLogicalRange(range);
+                            }
+                        });
+                        isSyncing = false;
+                    });
                 });
+
+                // 新增：強化 Crosshair (十字游標) 的完美聯動
+                const handleCrosshairMove = (chart, e) => {
+                    if (e === undefined || !e.time || e.point.x < 0 || e.point.y < 0) {
+                        charts.forEach(c => c.clearCrosshairPosition());
+                        return;
+                    }
+                    charts.forEach(c => {
+                        if (c !== chart) {
+                            // 將游標位置廣播給所有圖表
+                            c.setCrosshairPosition(e.point.x, e.time, kSeries); 
+                        }
+                    });
+                };
+
+                kChart.subscribeCrosshairMove((e) => handleCrosshairMove(kChart, e));
+                vChart.subscribeCrosshairMove((e) => handleCrosshairMove(vChart, e));
+                mChart.subscribeCrosshairMove((e) => handleCrosshairMove(mChart, e));
+                kjChart.subscribeCrosshairMove((e) => handleCrosshairMove(kjChart, e));
+
 
                 const ro = new ResizeObserver(() => {
                     const nw = containerRefs.kline.current?.clientWidth;
