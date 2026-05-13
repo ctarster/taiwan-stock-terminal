@@ -21,6 +21,26 @@
         .glass-panel { background: rgba(10, 10, 10, 0.97); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); }
         .panel-card { background-color: #050505; border: 1px solid rgba(255,255,255,0.06); border-radius: 0.25rem; }
         .predict-panel { border: 1px solid rgba(220, 38, 38, 0.4); animation: pulseBorder 3s infinite ease-in-out; }
+        
+        /* 響應式字體大小調整 */
+        @media (max-width: 1400px) {
+            .responsive-text-sm { font-size: 0.7rem; }
+            .responsive-text-base { font-size: 0.8rem; }
+            .responsive-text-lg { font-size: 1rem; }
+            .responsive-text-xl { font-size: 1.25rem; }
+            .responsive-text-3xl { font-size: 1.875rem; }
+            .header-padding { padding: 0.5rem; }
+            .panel-padding { padding: 0.5rem; }
+        }
+        @media (min-width: 1401px) {
+            .responsive-text-sm { font-size: 0.75rem; }
+            .responsive-text-base { font-size: 0.875rem; }
+            .responsive-text-lg { font-size: 1.125rem; }
+            .responsive-text-xl { font-size: 1.5rem; }
+            .responsive-text-3xl { font-size: 2.25rem; }
+            .header-padding { padding: 0.75rem; }
+            .panel-padding { padding: 0.75rem; }
+        }
     </style>
 </head>
 <body>
@@ -29,7 +49,16 @@
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef, useMemo } = React;
 
-        const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"; // 升級為最新版模型
+        const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
+
+        // 股票名稱對照表 (簡易版，可再擴充)
+        const STOCK_NAMES = {
+            '2330': '台積電', '2317': '鴻海', '2454': '聯發科', '3481': '群創',
+            '2603': '長榮', '2308': '台達電', '2382': '廣達', '3231': '緯創',
+            '2356': '英業達', '2618': '陽明', '2615': '萬海', '2412': '中華電'
+        };
+
+        const getStockName = (id) => STOCK_NAMES[id] || id;
 
         // ─── 數值工具 ───────────────────────────────────────────────────────────────
         const safeNum = (val, fallback = 0) => {
@@ -159,11 +188,11 @@
                         high: r.h !== '-' ? safeNum(r.h, price) : price,
                         low:  r.l !== '-' ? safeNum(r.l, price) : price,
                         volume: safeNum(r.v),
-                        name: r.n || ''
+                        name: r.n || getStockName(id)
                     };
                 }
             } catch {}
-            return null;
+            return { name: getStockName(id) }; // 失敗時也回傳預設名稱
         };
 
         const fetchHistory = async (id) => {
@@ -213,7 +242,8 @@
         };
 
         // ─── 空白 Quote 工廠 ───────────────────────
-        const emptyQuote = () => ({
+        const emptyQuote = (id) => ({
+            name: getStockName(id),
             price: null, change: null, percent: null,
             open: null, high: null, low: null, volume: null,
             marketCap: '---', pe: '---', pb: '---', yield: '---', forwardPE: '---'
@@ -222,10 +252,9 @@
         // ─── 主元件 ───────────────────────────────────────────────────────────────────
         const App = () => {
             const [stockId,      setStockId]      = useState('3481');
-            const [currentName,  setCurrentName]  = useState('群創');
             const [inputValue,   setInputValue]   = useState('');
             const [customKey,    setCustomKey]    = useState(() => (localStorage.getItem('api_key_groq') || '').trim());
-            const [liveQuote,    setLiveQuote]    = useState(emptyQuote());
+            const [liveQuote,    setLiveQuote]    = useState(emptyQuote('3481'));
             const [history,      setHistory]      = useState([]);
             const [aiData,       setAiData]       = useState(null);
             const [techFeatures, setTechFeatures]  = useState(null);
@@ -413,7 +442,8 @@
             useEffect(() => {
                 const gen = ++fetchGen.current;
 
-                setLiveQuote(emptyQuote());
+                // 初始化狀態，確保名稱正確
+                setLiveQuote(emptyQuote(stockId));
                 setHistory([]);
                 setAiData(null);
                 setTechFeatures(null);
@@ -430,9 +460,7 @@
                 livePromise.then(q => {
                     if (fetchGen.current !== gen) return;
                     if (q) {
-                        if (q.name) setCurrentName(q.name);
-                        const { name, ...quote } = q;
-                        setLiveQuote(prev => ({ ...prev, ...quote }));
+                        setLiveQuote(prev => ({ ...prev, ...q }));
                     }
                 });
 
@@ -495,14 +523,22 @@
                     setAiData(null);
                     try {
                         const prompt = `你是一名頂級機構的量化交易工程師。
-請根據以下參數計算並預測台股 [${stockId}] 次日的走勢。
-【當前特徵】現價: ${liveQuote.price}, 波動率 ATR(14): ${techFeatures.atr}, 動能 RSI(14): ${techFeatures.rsi}, MACD DIF: ${techFeatures.macd.dif}, MACD DEA: ${techFeatures.macd.dea}, KDJ J值: ${techFeatures.kdj.j}。
+請根據以下參數計算並預測台股 [${stockId} ${liveQuote.name}] 次日的走勢。
+【當前特徵】現價: ${liveQuote.price}, 今日開盤: ${liveQuote.open}, 今日高低點: ${liveQuote.high} - ${liveQuote.low}
+波動率 ATR(14): ${techFeatures.atr}, 動能 RSI(14): ${techFeatures.rsi}, MACD DIF: ${techFeatures.macd.dif}, MACD DEA: ${techFeatures.macd.dea}, KDJ J值: ${techFeatures.kdj.j}。
+
+【分析邏輯指示】
+1. 若今日為強勢上漲且收高，但 RSI 超買 (>75) 且 KDJ 的 J 值極端 (>100)，請評估明日「高開低走」或「高檔震盪」的可能性。
+2. 結合 ATR 評估明日的合理價格區間 (開盤/收盤預估)。
+3. 根據動能指標給出合理的機率分佈。
+
 【任務限制】
 1. 計算明日的預估開盤價與收盤價（必須是數字）。
 2. 根據 ATR 與 RSI 給出上漲、盤整、下跌機率（整數，總和必須為100）。
 3. 設定第一停利目標價 (TP1) 與嚴格停損價 (SL)（必須是數字）。
-4. 只能輸出純 JSON，嚴禁任何 markdown 或說明文字。
-格式：{"prediction":{"open":"","close":"","prob":{"up":0,"flat":0,"down":0},"targets":{"tp1":"","sl":""}},"market":{"taiex":"","sox":""},"strategy":{"score":0,"conclusion":""}}`;
+4. 分析明日高開/低開的可能劇本與應對策略。
+5. 只能輸出純 JSON，嚴禁任何 markdown 或說明文字。
+格式：{"prediction":{"open":"","close":"","prob":{"up":0,"flat":0,"down":0},"targets":{"tp1":"","sl":""},"open_analysis":"分析明日高開或低開的機率與原因"},"market":{"taiex":"","sox":""},"strategy":{"score":0,"conclusion":""}}`;
 
                         const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
                             method: 'POST',
@@ -565,34 +601,34 @@
             return (
                 <div className="min-h-screen bg-[#030303] text-gray-200 font-sans p-2 flex flex-col" style={{ height: '100vh' }}>
                     {/* Header */}
-                    <header className="flex-none flex justify-between items-center mb-2 bg-[#0a0a0a] p-3 border border-gray-800 rounded">
+                    <header className="flex-none flex justify-between items-center mb-2 bg-[#0a0a0a] header-padding border border-gray-800 rounded">
                         <div className="flex items-center gap-4">
-                            <h1 className="text-xl font-bold text-white tracking-tighter">
-                                {currentName}
-                                <span className="text-blue-500 font-mono text-sm ml-2">{stockId}</span>
+                            <h1 className="responsive-text-xl font-bold text-white tracking-tighter">
+                                {liveQuote.name}
+                                <span className="text-blue-500 font-mono responsive-text-sm ml-2">{stockId}</span>
                             </h1>
                             <div className="h-6 w-px bg-gray-700"></div>
-                            <span className={`text-3xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'}`}>
+                            <span className={`responsive-text-3xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'}`}>
                                 {liveQuote.price ? fmtPrice(liveQuote.price) : '---'}
                             </span>
-                            <div className={`flex flex-col text-xs font-bold font-mono ${isUp ? 'text-red-500' : 'text-green-500'}`}>
+                            <div className={`flex flex-col responsive-text-sm font-bold font-mono ${isUp ? 'text-red-500' : 'text-green-500'}`}>
                                 <span>{fmtChange(liveQuote.change)}</span>
                                 <span>{fmtPct(liveQuote.percent)}</span>
                             </div>
                         </div>
                         <div className="flex gap-2 items-center">
-                            {isChartLoading && <span className="text-xs text-gray-500 animate-pulse">資料載入中…</span>}
+                            {isChartLoading && <span className="responsive-text-sm text-gray-500 animate-pulse hidden sm:inline">資料載入中…</span>}
                             <input
                                 type="text" value={inputValue}
                                 onChange={e => setInputValue(e.target.value)}
                                 onKeyDown={e => e.key === 'Enter' && handleSearch()}
                                 placeholder="輸入代號"
-                                className="w-32 bg-[#111] border border-gray-700 px-3 py-1.5 text-xs rounded text-white outline-none"
+                                className="w-24 sm:w-32 bg-[#111] border border-gray-700 px-3 py-1.5 responsive-text-sm rounded text-white outline-none"
                             />
-                            <button onClick={handleSearch} className="bg-blue-900 border border-blue-700 px-4 py-1.5 text-xs font-bold rounded text-white hover:bg-blue-800">
+                            <button onClick={handleSearch} className="bg-blue-900 border border-blue-700 px-4 py-1.5 responsive-text-sm font-bold rounded text-white hover:bg-blue-800">
                                 查詢
                             </button>
-                            <button onClick={() => setShowSettings(s => !s)} className="bg-gray-800 border border-gray-600 px-3 py-1.5 text-xs font-bold rounded text-white hover:bg-gray-700">
+                            <button onClick={() => setShowSettings(s => !s)} className="bg-gray-800 border border-gray-600 px-3 py-1.5 responsive-text-sm font-bold rounded text-white hover:bg-gray-700">
                                 Groq 設定
                             </button>
                         </div>
@@ -623,43 +659,43 @@
 
                     <main className="flex-1 grid grid-cols-12 gap-2 overflow-hidden min-h-0">
                         {/* 左側面板 */}
-                        <div className="col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-1 min-h-0">
+                        <div className="col-span-12 md:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-1 min-h-0">
 
                             {/* Groq 預測 */}
-                            <div className="panel-card predict-panel p-3 bg-red-950/10 flex flex-col gap-3 relative overflow-hidden">
-                                <div className="text-red-500 font-bold text-xs tracking-widest border-b border-red-900/50 pb-1">
+                            <div className="panel-card predict-panel panel-padding bg-red-950/10 flex flex-col gap-3 relative overflow-hidden flex-none">
+                                <div className="text-red-500 font-bold responsive-text-sm tracking-widest border-b border-red-900/50 pb-1">
                                     GROQ 價格預測模型
                                 </div>
                                 {!customKey ? (
-                                    <div className="text-center py-4 text-gray-500 text-[10px]">請先設定 Groq API 金鑰</div>
+                                    <div className="text-center py-4 text-gray-500 responsive-text-sm">請先設定 Groq API 金鑰</div>
                                 ) : isAiLoading ? (
-                                    <div className="text-center py-4 text-red-400 text-xs animate-pulse">模型推理中…</div>
+                                    <div className="text-center py-4 text-red-400 responsive-text-sm animate-pulse">模型推理中…</div>
                                 ) : (
                                     <>
                                         <div className="flex justify-between gap-2">
                                             {[['明日開盤預估', aiData?.prediction?.open], ['明日收盤預估', aiData?.prediction?.close]].map(([label, val]) => (
                                                 <div key={label} className="flex-1 bg-black/60 border border-red-900/30 rounded p-2 text-center">
-                                                    <div className="text-[10px] text-gray-500 mb-1">{label}</div>
-                                                    <div className="text-lg font-mono font-black text-white">{val || '---'}</div>
+                                                    <div className="responsive-text-sm text-gray-500 mb-1">{label}</div>
+                                                    <div className="responsive-text-xl font-mono font-black text-white">{val || '---'}</div>
                                                 </div>
                                             ))}
                                         </div>
 
                                         <div className="bg-black/40 border border-gray-800 rounded p-2">
-                                            <div className="text-[10px] text-gray-400 mb-1">機率分佈預估</div>
-                                            <div className="h-1.5 w-full bg-gray-800 rounded flex overflow-hidden">
+                                            <div className="responsive-text-sm text-gray-400 mb-1">機率分佈預估</div>
+                                            <div className="h-2 w-full bg-gray-800 rounded flex overflow-hidden">
                                                 <div style={{ width: `${aiData?.prediction?.prob?.up || 0}%` }} className="bg-red-500 transition-all duration-700"></div>
                                                 <div style={{ width: `${aiData?.prediction?.prob?.flat || 0}%` }} className="bg-gray-400 transition-all duration-700"></div>
                                                 <div style={{ width: `${aiData?.prediction?.prob?.down || 0}%` }} className="bg-green-500 transition-all duration-700"></div>
                                             </div>
-                                            <div className="flex justify-between text-[9px] mt-1 font-mono">
+                                            <div className="flex justify-between responsive-text-sm mt-1 font-mono">
                                                 <span className="text-red-400">漲 {aiData?.prediction?.prob?.up ?? '--'}%</span>
                                                 <span className="text-gray-400">盤 {aiData?.prediction?.prob?.flat ?? '--'}%</span>
                                                 <span className="text-green-400">跌 {aiData?.prediction?.prob?.down ?? '--'}%</span>
                                             </div>
                                         </div>
 
-                                        <div className="flex flex-col gap-1 text-[11px] font-mono border-t border-red-900/30 pt-2">
+                                        <div className="flex flex-col gap-1 responsive-text-sm font-mono border-t border-red-900/30 pt-2">
                                             <div className="flex justify-between">
                                                 <span className="text-gray-400">目標一 (TP1)</span>
                                                 <span className="text-red-400 font-bold">{aiData?.prediction?.targets?.tp1 || '---'}</span>
@@ -674,11 +710,11 @@
                             </div>
 
                             {/* 技術特徵 */}
-                            <div className="panel-card bg-[#050505]">
-                                <div className="bg-blue-950/20 border-b border-gray-800 p-2">
-                                    <span className="text-blue-400 font-bold text-[10px] tracking-widest uppercase">技術特徵 (Tech Features)</span>
+                            <div className="panel-card bg-[#050505] flex-none">
+                                <div className="bg-blue-950/20 border-b border-gray-800 panel-padding">
+                                    <span className="text-blue-400 font-bold responsive-text-sm tracking-widest uppercase">技術特徵 (Tech Features)</span>
                                 </div>
-                                <div className="p-3 grid grid-cols-2 gap-2 text-[10px] font-mono">
+                                <div className="panel-padding grid grid-cols-2 gap-2 responsive-text-sm font-mono">
                                     {[
                                         ['ATR(14)', techFeatures?.atr, 'text-yellow-400'],
                                         ['RSI(14)', techFeatures?.rsi, 'text-white'],
@@ -694,11 +730,11 @@
                             </div>
 
                             {/* 基本面 */}
-                            <div className="panel-card bg-[#050505] flex-1">
-                                <div className="bg-slate-900/40 border-b border-gray-800 p-2">
-                                    <span className="text-gray-300 font-bold text-[10px] tracking-widest uppercase">基本面與估值</span>
+                            <div className="panel-card bg-[#050505] flex-1 min-h-0 flex flex-col">
+                                <div className="bg-slate-900/40 border-b border-gray-800 panel-padding flex-none">
+                                    <span className="text-gray-300 font-bold responsive-text-sm tracking-widest uppercase">基本面與估值</span>
                                 </div>
-                                <div className="p-3 space-y-2 text-[10px] font-mono">
+                                <div className="panel-padding space-y-2 responsive-text-sm font-mono overflow-y-auto custom-scrollbar">
                                     {[
                                         ['總市值', liveQuote.marketCap, 'text-white'],
                                         ['殖利率', liveQuote.yield, 'text-white'],
@@ -716,14 +752,14 @@
                         </div>
 
                         {/* 圖表區 */}
-                        <div className="col-span-6 flex flex-col border border-gray-800 bg-[#050505] rounded overflow-hidden min-h-0">
-                            <div className="bg-gray-900/50 p-1.5 flex gap-3 text-[10px] font-mono border-b border-gray-800 text-gray-400 flex-none">
+                        <div className="col-span-12 md:col-span-6 flex flex-col border border-gray-800 bg-[#050505] rounded overflow-hidden min-h-[300px] md:min-h-0">
+                            <div className="bg-gray-900/50 panel-padding flex flex-wrap gap-x-3 gap-y-1 responsive-text-sm font-mono border-b border-gray-800 text-gray-400 flex-none">
                                 <span>開:<span className="text-gray-200">{fmtPrice(hoverData?.open)}</span></span>
                                 <span>高:<span className="text-red-400">{fmtPrice(hoverData?.high)}</span></span>
                                 <span>低:<span className="text-green-400">{fmtPrice(hoverData?.low)}</span></span>
                                 <span>收:<span className="text-white font-bold">{fmtPrice(hoverData?.close)}</span></span>
                                 <span>量:<span className="text-blue-400">{fmtVol(hoverData?.volume)}</span></span>
-                                <span className="ml-auto text-[9px] text-gray-600">MA5:<span className="text-yellow-400 ml-1">{fmtPrice(hoverData?.ma5)}</span> MA20:<span className="text-blue-400 ml-1">{fmtPrice(hoverData?.ma20)}</span></span>
+                                <span className="md:ml-auto text-gray-600">MA5:<span className="text-yellow-400 ml-1">{fmtPrice(hoverData?.ma5)}</span> MA20:<span className="text-blue-400 ml-1">{fmtPrice(hoverData?.ma20)}</span></span>
                             </div>
                             <div className="flex-1 flex flex-col min-h-0">
                                 <div ref={containerRefs.kline} className="w-full" style={{ flex: 3 }}></div>
@@ -734,15 +770,15 @@
                         </div>
 
                         {/* 右側面板 */}
-                        <div className="col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pl-1 min-h-0">
-                            <div className="panel-card bg-[#050505]">
-                                <div className="bg-orange-950/20 border-b border-gray-800 p-2 flex justify-between items-center">
-                                    <span className="text-orange-400 font-bold text-[10px] uppercase">AI 戰略矩陣</span>
+                        <div className="col-span-12 md:col-span-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar pl-1 min-h-0">
+                            <div className="panel-card bg-[#050505] flex-none">
+                                <div className="bg-orange-950/20 border-b border-gray-800 panel-padding flex justify-between items-center">
+                                    <span className="text-orange-400 font-bold responsive-text-sm uppercase">AI 戰略矩陣</span>
                                     {aiData?.strategy?.score != null && (
-                                        <span className="text-white font-black text-sm">{aiData.strategy.score} 分</span>
+                                        <span className="text-white font-black responsive-text-base">{aiData.strategy.score} 分</span>
                                     )}
                                 </div>
-                                <div className="p-3 text-[11px] text-gray-300 leading-relaxed">
+                                <div className="panel-padding responsive-text-sm text-gray-300 leading-relaxed">
                                     {isAiLoading ? (
                                         <span className="text-gray-500 animate-pulse">分析中…</span>
                                     ) : aiData?.strategy?.conclusion ? (
@@ -753,11 +789,27 @@
                                 </div>
                             </div>
 
-                            <div className="panel-card bg-[#050505] flex-1">
-                                <div className="bg-cyan-950/20 border-b border-gray-800 p-2">
-                                    <span className="text-cyan-400 font-bold text-[10px] uppercase">總體聯動</span>
+                            {/* 盤前分析區塊 */}
+                            <div className="panel-card bg-[#050505] flex-1 flex flex-col min-h-0">
+                                <div className="bg-indigo-950/20 border-b border-gray-800 panel-padding flex-none">
+                                    <span className="text-indigo-400 font-bold responsive-text-sm uppercase">AI 盤前開盤分析</span>
                                 </div>
-                                <div className="p-3 text-[10px] space-y-2 font-mono">
+                                <div className="panel-padding responsive-text-sm text-gray-300 leading-relaxed overflow-y-auto custom-scrollbar">
+                                    {isAiLoading ? (
+                                        <span className="text-gray-500 animate-pulse">分析中…</span>
+                                    ) : aiData?.prediction?.open_analysis ? (
+                                        aiData.prediction.open_analysis
+                                    ) : (
+                                        <span className="text-gray-600">等待分析結果…</span>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="panel-card bg-[#050505] flex-none">
+                                <div className="bg-cyan-950/20 border-b border-gray-800 panel-padding">
+                                    <span className="text-cyan-400 font-bold responsive-text-sm uppercase">總體聯動</span>
+                                </div>
+                                <div className="panel-padding responsive-text-sm space-y-2 font-mono">
                                     {[
                                         ['大盤狀態 (加權)', aiData?.market?.taiex],
                                         ['費城半導體 (SOX)', aiData?.market?.sox]
@@ -771,11 +823,11 @@
                             </div>
 
                             {/* 指標說明 */}
-                            <div className="panel-card bg-[#050505]">
-                                <div className="bg-gray-900/40 border-b border-gray-800 p-2">
-                                    <span className="text-gray-500 font-bold text-[10px] uppercase">圖例</span>
+                            <div className="panel-card bg-[#050505] flex-none hidden md:block">
+                                <div className="bg-gray-900/40 border-b border-gray-800 panel-padding">
+                                    <span className="text-gray-500 font-bold responsive-text-sm uppercase">圖例</span>
                                 </div>
-                                <div className="p-3 space-y-1.5 text-[10px] font-mono">
+                                <div className="panel-padding space-y-1.5 responsive-text-sm font-mono">
                                     {[
                                         ['●', 'text-yellow-400', 'MA5 (5日均線)'],
                                         ['●', 'text-blue-400', 'MA20 (20日均線)'],
