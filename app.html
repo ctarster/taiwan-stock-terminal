@@ -81,7 +81,6 @@
         const fmtPct     = v => { if (v == null || isNaN(+v)) return '---'; return +v > 0 ? `+${(+v).toFixed(2)}%` : `${(+v).toFixed(2)}%`; };
         const fmtVol     = v => (v == null || isNaN(+v)) ? '0' : Math.round(+v).toLocaleString('en-US');
         
-        // 新增單位格式化輔助函數
         const fmtUnit = (val, unit) => (val == null || val === '---' || val === '') ? '---' : `${val}${unit}`;
 
         const Indicators = {
@@ -162,8 +161,7 @@
             const enc = encodeURIComponent(url);
             const proxies = [
                 { url: `https://api.allorigins.win/raw?url=${enc}`, isWrapper: false },
-                { url: `https://api.codetabs.com/v1/proxy?quest=${url}`, isWrapper: false },
-                { url: `https://corsproxy.io/?${enc}`, isWrapper: false }
+                { url: `https://api.codetabs.com/v1/proxy?quest=${url}`, isWrapper: false }
             ];
 
             const ctrls = proxies.map(() => new AbortController());
@@ -217,11 +215,12 @@
                         high: r.h !== '-' ? safeNum(r.h, price) : price,
                         low:  r.l !== '-' ? safeNum(r.l, price) : price,
                         volume: safeNum(r.v),
-                        name: r.n || STOCK_NAMES[id] || id
+                        name: r.n || STOCK_NAMES[id] || id,
+                        status: 'live' // 標記為真實即時資料
                     };
                 }
             } catch {}
-            return { name: STOCK_NAMES[id] || id };
+            return { name: STOCK_NAMES[id] || id, status: 'error' };
         };
 
         const fetchHistory = async (id) => {
@@ -252,7 +251,8 @@
             name: STOCK_NAMES[id] || id,
             price: null, change: null, percent: null,
             open: null, high: null, low: null, volume: null,
-            marketCap: '---', pe: '---', pb: '---', yield: '---', forwardPE: '---'
+            marketCap: '---', pe: '---', pb: '---', yield: '---', forwardPE: '---',
+            status: 'loading'
         });
 
         const App = () => {
@@ -300,6 +300,7 @@
                 });
             };
 
+            // Watchlist polling
             useEffect(() => {
                 let isActive = true;
                 const updateWatchlistQuotes = async () => {
@@ -316,7 +317,7 @@
                     }
                 };
                 updateWatchlistQuotes();
-                const interval = setInterval(updateWatchlistQuotes, 8000); 
+                const interval = setInterval(updateWatchlistQuotes, 10000); 
                 return () => { isActive = false; clearInterval(interval); };
             }, [watchlist]);
 
@@ -375,6 +376,7 @@
                 ro.observe(containerRefs.kline.current);
             }, []);
 
+            // 確保資料去重，解決 Lightweight Charts 報錯
             const chartData = useMemo(() => {
                 if (!history.length) return [];
                 const dataMap = new Map();
@@ -461,6 +463,7 @@
                 });
             }, [chartData, initCharts]);
 
+            // Data Pipeline with Graceful Degradation
             useEffect(() => {
                 const gen = ++fetchGen.current;
 
@@ -477,7 +480,7 @@
                 fetchTWSELive(stockId).then(q => {
                     if (fetchGen.current !== gen) return;
                     isTwseDone = true;
-                    if (q) {
+                    if (q && q.price !== null) {
                         if (q.name) setCurrentName(q.name);
                         const { name, ...quote } = q;
                         setLiveQuote(prev => ({ ...prev, ...quote }));
@@ -488,11 +491,16 @@
                     if (fetchGen.current !== gen) return;
                     if (rows.length > 0) {
                         setHistory(rows);
+                        // Graceful Degradation: 如果 TWSE 失敗，強制用 FinMind 最後一筆收盤價作為現價，啟動 AI
                         if (!isTwseDone) {
                             const last = rows[rows.length - 1];
                             setLiveQuote(prev => {
                                 if (prev.price === null) {
-                                    return { ...prev, price: last.close, open: last.open, high: last.high, low: last.low, volume: last.volume };
+                                    return { 
+                                        ...prev, 
+                                        price: last.close, open: last.open, high: last.high, low: last.low, volume: last.volume,
+                                        change: 0, percent: 0, status: 'fallback' 
+                                    };
                                 }
                                 return prev;
                             });
@@ -509,6 +517,7 @@
 
             }, [stockId, destroyCharts]);
 
+            // AI Hybrid Reasoning Engine
             useEffect(() => {
                 if (!techFeatures || !customKey || !liveQuote.price) return;
                 const gen = fetchGen.current;
@@ -518,10 +527,17 @@
                     setIsAiLoading(true);
                     setAiData(null);
                     try {
+                        // 【數學運算約束】：前端直接計算 AI 允許的極限預測區間
+                        const currentPrice = Number(liveQuote.price);
+                        const atrVal = Number(techFeatures.atr);
+                        const limitHigh = (currentPrice + (atrVal * 1.5)).toFixed(2);
+                        const limitLow = (currentPrice - (atrVal * 1.5)).toFixed(2);
+
                         const prompt = `你是一名頂級機構的量化交易工程師。請根據以下參數與你的金融知識庫，計算並預測台股 [${stockId} ${currentName}] 次日的走勢，並推算總體經濟與基本面狀態。
-【當前特徵】現價: ${liveQuote.price}, 波動率 ATR(14): ${techFeatures.atr}, 動能 RSI(14): ${techFeatures.rsi}, MACD DIF: ${techFeatures.macd.dif}, MACD DEA: ${techFeatures.macd.dea}, KDJ J值: ${techFeatures.kdj.j}。
-【任務限制】
-1. 計算明日的預估開盤價與收盤價（必須是數字）。
+【當前特徵】現價: ${currentPrice}, 波動率 ATR(14): ${techFeatures.atr}, 動能 RSI(14): ${techFeatures.rsi}, MACD DIF: ${techFeatures.macd.dif}, MACD DEA: ${techFeatures.macd.dea}, KDJ J值: ${techFeatures.kdj.j}。
+
+【任務限制與數學約束】
+1. 計算明日的預估開盤價與收盤價（必須是數字）。**嚴格限制**：預測價必須落在 [現價 ± (ATR * 1.5)] 的區間內，也就是絕對不可超過 [${limitLow}] ~ [${limitHigh}] 之間。
 2. 根據特徵，撰寫「open_analysis (盤前開盤分析)」。要求：條列式或極短句，精簡扼要，重點指出高開/低開的應對策略與支撐壓力位。
 3. 推估「基本面與總體經濟 (market)」，必須填寫所有空缺數值(市值單位用'億'或'兆'，本益比/殖利率用數字)，嚴禁留空。包含：taiex(大盤狀態描述), sox(費半狀態描述), marketCap(預估市值), pe(預估本益比), pb(預估股淨比), yield(預估殖利率)。
 4. 推估籌碼動向 (chips)：主力量能、機構動態、散戶情緒(簡短描述)，並給出 0~100 的多空指標 (bull_bear_index)。
@@ -595,9 +611,25 @@
                                 <span className="text-blue-500 font-mono responsive-text-sm ml-2">{stockId}</span>
                             </h1>
                             <div className="h-5 w-px bg-gray-700"></div>
-                            <span className={`text-2xl lg:text-3xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'} value-update`} key={liveQuote.price}>
-                                {liveQuote.price ? fmtPrice(liveQuote.price) : '---'}
-                            </span>
+                            
+                            {/* 即時報價與狀態指示燈 */}
+                            <div className="flex items-center gap-2">
+                                <span className={`text-2xl lg:text-3xl font-black font-mono ${isUp ? 'text-red-500' : 'text-green-500'} value-update`} key={liveQuote.price}>
+                                    {liveQuote.price ? fmtPrice(liveQuote.price) : '---'}
+                                </span>
+                                {liveQuote.status === 'fallback' && (
+                                    <span className="flex h-2 w-2 relative" title="即時資料延遲，目前使用昨日收盤價備援">
+                                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span>
+                                      <span className="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>
+                                    </span>
+                                )}
+                                {liveQuote.status === 'live' && (
+                                    <span className="flex h-2 w-2 relative" title="即時報價連線中">
+                                      <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                                    </span>
+                                )}
+                            </div>
+
                             <div className={`flex flex-col responsive-text-sm font-bold font-mono ${isUp ? 'text-red-500' : 'text-green-500'}`}>
                                 <span className="value-update" key={liveQuote.change}>{fmtChange(liveQuote.change)}</span>
                                 <span className="value-update" key={liveQuote.percent}>{fmtPct(liveQuote.percent)}</span>
@@ -737,7 +769,7 @@
                                 </div>
                             </div>
 
-                            {/* 基本面 (修復對齊與單位) */}
+                            {/* 基本面 */}
                             <div className="panel-card bg-[#050505] flex-1">
                                 <div className="bg-slate-900/40 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-gray-300 font-bold text-[10px] tracking-widest uppercase">基本面與估值 (AI 估算)</span>
@@ -776,7 +808,7 @@
                         {/* 右側面板 (戰略與清單) */}
                         <div className="col-span-12 lg:col-span-3 flex flex-col gap-1 lg:gap-2 overflow-y-auto custom-scrollbar pl-1 min-h-0">
                             
-                            {/* 總體聯動 (移到最上方) */}
+                            {/* 總體聯動 */}
                             <div className="panel-card bg-[#050505] flex-none">
                                 <div className="bg-cyan-950/20 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-cyan-400 font-bold text-[10px] uppercase">總體聯動 (AI 判讀)</span>
@@ -854,7 +886,7 @@
                                 </div>
                             </div>
 
-                            {/* AI 盤前開盤分析 (修剪文字量) */}
+                            {/* AI 盤前開盤分析 */}
                             <div className="panel-card bg-[#050505] flex-1 flex flex-col">
                                 <div className="bg-blue-950/20 border-b border-gray-800 p-1.5 px-2">
                                     <span className="text-blue-400 font-bold text-[10px] uppercase">AI 盤前開盤分析</span>
