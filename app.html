@@ -793,34 +793,85 @@ function runBacktest(rows, bars=180){
   if(rows.length < 80) return null;
   const start = Math.max(60, rows.length - bars - 1);
   const trainRows = rows.slice(0, start+1);
+  // 用回測起點之前的資料學習一組「凍結權重」
   const frozenWeights = adaptiveWeights(trainRows, {});
   const wKeys = Object.keys(frozenWeights);
+
+  // 真實交易成本設定 (台股基準)
+  // 假設使用一般量化API券商 (如永豐金證券 Shioaji、富果 Fugle API)，手續費抓 2.8 折
+  const FEE_RATE = 0.001425 * 0.28; 
+  const TAX_RATE = 0.003; 
 
   let equity = 1, grossWin = 0, grossLoss = 0, wins = 0, trades = 0, absErrSum = 0;
   const equityCurve = [1];
   const tradeRets = [];
 
-  for(let i=start;i<rows.length-1;i++){
+  for(let i=start; i<rows.length-1; i++){
     const sig = factorSignalsAt(rows, i, {});
     let score = 0;
     for(const n of wKeys) score += sig[n] * frozenWeights[n];
-    const cur = rows[i].close;
-    const nxt = rows[i+1].close;
-    if(!cur || !nxt){ equityCurve.push(equity); continue; }
-    const ret = (nxt-cur)/cur;
-    const dir = score > 0.07 ? 1 : score < -0.07 ? -1 : 0;
-    if(dir!==0){
-      trades++;
-      const pnl = dir * ret;
-      tradeRets.push(pnl);
-      if(pnl > 0){ wins++; grossWin += pnl; } else { grossLoss += Math.abs(pnl); }
-      equity *= (1 + pnl);
+    
+    const cur = rows[i];
+    const nxt = rows[i+1];
+    if(!cur || !nxt || !nxt.open || !nxt.close){ 
+      equityCurve.push(equity); 
+      continue; 
     }
-    equityCurve.push(equity);
 
-    const atr = Math.max(0.01, safeN(rows[i].atr, cur*0.02));
-    const evClose = cur + score * atr * (0.55 + Math.abs(score)*1.25);
-    absErrSum += Math.abs(evClose - nxt) / cur;
+    const atr = Math.max(0.01, safeN(cur.atr, cur.close*0.02));
+    const evClose = cur.close + score * atr * (0.55 + Math.abs(score)*1.25);
+    absErrSum += Math.abs(evClose - nxt.close) / cur.close;
+
+    // 分數超過閥值才觸發交易
+    const dir = score > 0.07 ? 1 : score < -0.07 ? -1 : 0;
+    if(dir === 0){
+      equityCurve.push(equity);
+      continue;
+    }
+
+    trades++;
+    
+    // 真實進場點：隔日開盤
+    const entryPrice = nxt.open;
+    let exitPrice = nxt.close; // 預設為隔日收盤平倉
+    let pnl = 0;
+
+    // 設定觸價平倉線
+    const tp = cur.close + dir * atr * 1.15;
+    const sl = cur.close - dir * atr * 1.05;
+
+    if(dir === 1){
+      // 做多邏輯：檢查日內高低點
+      if(nxt.low <= sl){
+        exitPrice = sl; // 盤中觸發停損
+      } else if(nxt.high >= tp){
+        exitPrice = tp; // 盤中觸發停利
+      }
+      pnl = (exitPrice - entryPrice) / entryPrice;
+      // 扣除成本：買進手續費 + 賣出手續費與證交稅
+      pnl = pnl - FEE_RATE - (FEE_RATE + TAX_RATE);
+    } else {
+      // 做空邏輯
+      if(nxt.high >= sl){
+        exitPrice = sl; // 盤中觸發停損 (股價上漲越過停損線)
+      } else if(nxt.low <= tp){
+        exitPrice = tp; // 盤中觸發停利 (股價下跌越過目標價)
+      }
+      pnl = (entryPrice - exitPrice) / entryPrice;
+      // 融券/借券成本通常更高，這裡維持簡化稅費結構
+      pnl = pnl - FEE_RATE - (FEE_RATE + TAX_RATE);
+    }
+
+    tradeRets.push(pnl);
+    if(pnl > 0){ 
+      wins++; 
+      grossWin += pnl; 
+    } else { 
+      grossLoss += Math.abs(pnl); 
+    }
+    
+    equity *= (1 + pnl);
+    equityCurve.push(equity);
   }
 
   const avgWin = wins ? grossWin / wins : 0;
@@ -830,6 +881,7 @@ function runBacktest(rows, bars=180){
   const pf = grossLoss>0 ? grossWin/grossLoss : grossWin>0 ? 9.99 : 0;
   const mean = tradeRets.length ? tradeRets.reduce((a,b)=>a+b,0)/tradeRets.length : 0;
   const std  = tradeRets.length ? Math.sqrt(tradeRets.reduce((a,b)=>a+(b-mean)*(b-mean),0)/tradeRets.length) : 0;
+  // 假定 252 交易日年化 Sharpe
   const sharpeLike = std>0 ? (mean/std)*Math.sqrt(Math.max(1,tradeRets.length/12)) : 0;
   const mdd = calcMaxDrawdown(equityCurve);
   const kelly = kellyPosition(winRate, avgWin, avgLoss);
