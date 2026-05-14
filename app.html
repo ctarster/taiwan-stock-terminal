@@ -153,7 +153,7 @@ input:focus,select:focus{border-color:#355b88}
       <button id="searchBtn" class="btn btn-blue">查詢</button>
       <button id="watchBtn" class="btn">+ 加入追蹤</button>
       <button id="exportBtn" class="btn">匯出報告</button>
-      <button id="settingsBtn" class="btn">⚙ 設定</button>
+      <button id="settingsBtn" class="btn">設定</button>
     </div>
   </div>
 
@@ -688,7 +688,6 @@ function factorSignalsAt(rows, i, ext={}){
   maSig += (safeN(r.ma5) > safeN(prev.ma5)) ? 0.25 : -0.25;
   sig.ma = clamp(maSig,-1,1);
 
-  // ⚠ ext 只在「最新預測」帶入；回測時應傳空物件避免 look-ahead
   const chipNet = safeN(ext.chipNet,0);
   sig.chip = clamp(chipNet / 50000, -1, 1);
 
@@ -703,10 +702,6 @@ function factorSignalsAt(rows, i, ext={}){
 
   return sig;
 }
-/**
- * 自適應權重 — 用最近 N 根 K 線評估每個因子在歷史上的「方向命中能力」。
- * 為了效能，回測時可傳入快取後的權重（一次性計算）。
- */
 function adaptiveWeights(rows, ext={}){
   const names = Object.keys(BASE_WEIGHTS);
   const scoreMap = {};
@@ -764,7 +759,7 @@ function predictNext(rows, livePrice, ext={}){
 }
 
 /* ==========================================================================
-   風險 / 回測（已優化：使用固定權重 + walk-forward 簡化）
+   風險 / 回測
 ========================================================================== */
 function calcMaxDrawdown(equity){
   if(!equity.length) return 0;
@@ -794,15 +789,9 @@ function kellyPosition(winRate, avgWin, avgLoss){
   const raw = (b*winRate - q) / b;
   return clamp(raw*0.5, 0, 0.25);
 }
-/**
- * 回測引擎 — 不傳入即時籌碼 (避免 look-ahead)。
- * 權重只計算一次(用截至回測起點的資料)，後續每根 K 線僅做訊號計算 → O(n)
- */
 function runBacktest(rows, bars=180){
   if(rows.length < 80) return null;
   const start = Math.max(60, rows.length - bars - 1);
-
-  // 用回測起點之前的資料學習一組「凍結權重」，避免回測中 O(n²) 重學
   const trainRows = rows.slice(0, start+1);
   const frozenWeights = adaptiveWeights(trainRows, {});
   const wKeys = Object.keys(frozenWeights);
@@ -853,7 +842,7 @@ function runBacktest(rows, bars=180){
 }
 
 /* ==========================================================================
-   歷史紀錄（修正：以資料 index 與日期同時對位，重複整理不會錯位）
+   歷史紀錄
 ========================================================================== */
 function updatePredictionArchive(stockId, timeframe, latestRow, pred){
   if(!latestRow || !pred) return;
@@ -861,8 +850,6 @@ function updatePredictionArchive(stockId, timeframe, latestRow, pred){
   const db = getPredArchive();
   const arr = db[key] || [];
 
-  // 對上一筆若已過了交易日且未填 actual，填上(用 latestRow 當該日已實現)
-  // 注意:latest 是「截至目前」最新一根; 若 last.date 早於 latestRow.time，補上 actual
   if(arr.length){
     const last = arr[arr.length-1];
     if(last && !Number.isFinite(last.actual_close) && last.date < latestRow.time){
@@ -873,7 +860,6 @@ function updatePredictionArchive(stockId, timeframe, latestRow, pred){
     }
   }
 
-  // 若今日尚未紀錄,新增一筆預測(預測「下一根」)
   const existIdx = arr.findIndex(x=>x.date === latestRow.time);
   if(existIdx === -1){
     arr.push({
@@ -885,7 +871,6 @@ function updatePredictionArchive(stockId, timeframe, latestRow, pred){
       actual_close: null, actual_dir: null, hit: null, abs_err_pct: null
     });
   }else{
-    // 同日多次重整,以最新預測覆蓋(尚未驗證)
     const cur = arr[existIdx];
     if(!Number.isFinite(cur.actual_close)){
       cur.pred_close = safeN(pred.ev_close);
@@ -893,7 +878,6 @@ function updatePredictionArchive(stockId, timeframe, latestRow, pred){
       cur.confidence = safeN(pred.confidence);
     }
   }
-
   db[key] = arr.slice(-150);
   setPredArchive(db);
 }
@@ -957,13 +941,12 @@ async function fetchWithRetry(url, opts={}, ms=10000, retries=2){
     try{
       const res = await fetchTimeout(url, opts, ms);
       if(res.ok) return res;
-      // 429 / 5xx 才重試
       if(res.status===429 || res.status>=500){
         lastErr = new Error("HTTP " + res.status);
         await sleep(400 * (i+1));
         continue;
       }
-      return res; // 4xx 不重試
+      return res;
     }catch(e){
       lastErr = e;
       await sleep(400 * (i+1));
@@ -1006,7 +989,6 @@ async function fetchTWSELive(id){
       if(json?.msgArray?.length){
         const r = json.msgArray[0];
         const prev = safeN(r.y);
-        // 修正:r.z 與 r.a 的解析,先以 z(成交) 再退而求其次
         let price = prev;
         if(r.z && r.z !== "-") price = safeN(r.z, prev);
         else if(r.a && r.a !== "-"){
@@ -1030,6 +1012,35 @@ async function fetchTWSELive(id){
   }
   return null;
 }
+
+// 動態縫合即時報價至歷史 K 線，讓圖表顯示盤中最新價格
+function injectLiveQuote() {
+  if (!state.liveQuote || !state.rawRows.length) return;
+  const q = state.liveQuote;
+  if (!q.price) return;
+  
+  const o = safeN(q.open, q.price);
+  const h = safeN(q.high, q.price);
+  const l = safeN(q.low, q.price);
+  const c = q.price;
+  const v = safeN(q.volume, 0);
+
+  const todayStr = dateKey(new Date());
+  let lastRow = state.rawRows[state.rawRows.length - 1];
+
+  if (lastRow.time < todayStr) {
+    state.rawRows.push({
+      time: todayStr, open: o, high: h, low: l, close: c, volume: v
+    });
+  } else if (lastRow.time === todayStr) {
+    lastRow.close = c;
+    lastRow.high = Math.max(lastRow.high, h, c);
+    lastRow.low = Math.min(lastRow.low, l, c);
+    lastRow.volume = v || lastRow.volume;
+    if (o && o !== c) lastRow.open = o; 
+  }
+}
+
 function normNetFromRow(r){
   if("buy_sell" in r) return safeN(r.buy_sell);
   if("net_buy_sell" in r) return safeN(r.net_buy_sell);
@@ -1159,7 +1170,7 @@ function renderPrediction(){
   $("pTp2").textContent   = fp(p.tp2);
   $("pSl").textContent    = fp(p.sl);
   $("pConf").textContent  = p.confidence.toFixed(0) + "%";
-  $("probText").textContent = `↑${p.prob.up}% ／ →${p.prob.flat}% ／ ↓${p.prob.down}%`;
+  $("probText").textContent = `漲${p.prob.up}% / 平${p.prob.flat}% / 跌${p.prob.down}%`;
   $("probFill").style.width = p.prob.up + "%";
   $("lastScore").textContent = (p.score>=0?"+":"") + p.score.toFixed(3);
 
@@ -1173,7 +1184,7 @@ function renderPrediction(){
   p.factors.slice().sort((a,b)=>b.w-a.w).forEach(f=>{
     const tr = document.createElement("tr");
     const cls = f.sig>0.15 ? "factorPos" : f.sig<-0.15 ? "factorNeg" : "factorNeu";
-    const arrow = f.sig>0.15 ? "▲ 偏多" : f.sig<-0.15 ? "▼ 偏空" : "■ 中性";
+    const arrow = f.sig>0.15 ? "[偏多]" : f.sig<-0.15 ? "[偏空]" : "[中性]";
     tr.innerHTML = `<td>${labelMap[f.name]||f.name}</td>
       <td class="${cls}">${arrow} ${f.sig.toFixed(2)}</td>
       <td>${(f.w*100).toFixed(1)}%</td>`;
@@ -1271,7 +1282,7 @@ function renderAI(text, fromAI=false){
 }
 
 /* ==========================================================================
-   圖表（重點修正:時框切換不重建,只 setData）
+   圖表
 ========================================================================== */
 function buildCharts(){
   cleanupCharts();
@@ -1306,7 +1317,6 @@ function buildCharts(){
   state.series.d = state.charts.c4.addLineSeries({color:"#22c55e",lineWidth:1});
   state.series.j = state.charts.c4.addLineSeries({color:"#8b5cf6",lineWidth:1});
 
-  // 時間軸聯動
   [state.charts.c1, state.charts.c2, state.charts.c3, state.charts.c4].forEach((c,_,arr)=>{
     c.timeScale().subscribeVisibleLogicalRangeChange(r=>{
       if(!r) return;
@@ -1372,7 +1382,7 @@ async function loadStock(id, opts={}){
       fetchInstitutional(id),
       fetchMargin(id)
     ]);
-    if(token !== state.loadToken) return; // 被新請求覆蓋
+    if(token !== state.loadToken) return;
 
     const [histR, liveR, chipR, marginR] = results;
     if(histR.status !== "fulfilled"){
@@ -1400,6 +1410,7 @@ async function loadStock(id, opts={}){
       };
     }
 
+    injectLiveQuote();
     applyTimeframe(true);
     renderHeader();
     renderChips();
@@ -1425,16 +1436,13 @@ function applyTimeframe(forceRebuild=false){
   const livePrice = state.liveQuote ? state.liveQuote.price : state.enriched[state.enriched.length-1].close;
   state.pred = predictNext(state.enriched, livePrice, ext);
 
-  // 回測 — 不帶 ext (避免 look-ahead),並用凍結權重提升 100x 效能
   state.backtest = runBacktest(state.enriched, cfg.btBars);
 
-  // 預測歷史(僅日線)
   if(state.timeframe === "D" && state.pred){
     updatePredictionArchive(state.stockId, "D", state.enriched[state.enriched.length-1], state.pred);
   }
   state.archiveStats = calcArchiveStats(state.stockId, state.timeframe);
 
-  // 圖表:首次或股票變更才 rebuild,單純切時框只 setData
   const needRebuild = forceRebuild || !state.charts.c1 || state.lastTimeframe !== state.timeframe;
   if(needRebuild){
     buildCharts();
@@ -1458,7 +1466,7 @@ function buildLocalSummary(){
   return `本地多因子模型判斷：${dir}，綜合分數 ${p.score.toFixed(3)}，信心 ${p.confidence.toFixed(0)}%。\n`+
          `主導因子：${top}。\n`+
          `EV 收盤 ${fp(p.ev_close)}，TP1 ${fp(p.tp1)} / TP2 ${fp(p.tp2)} / SL ${fp(p.sl)}。\n`+
-         `機率分佈 ↑${p.prob.up}% / →${p.prob.flat}% / ↓${p.prob.down}%。`;
+         `機率分佈 漲${p.prob.up}% / 平${p.prob.flat}% / 跌${p.prob.down}%。`;
 }
 async function refreshAI(){
   if(!state.pred) return;
@@ -1499,13 +1507,15 @@ function startRealtime(){
   const sec = Math.max(5, +cfg.rtSec || 15);
   const tick = async ()=>{
     if(!state.stockId) return;
-    if(document.hidden) return; // 視窗隱藏時暫停
+    if(document.hidden) return;
     try{
       const live = await fetchTWSELive(state.stockId);
       if(live){
         state.liveQuote = live;
         renderHeader();
         checkAlerts(live.price);
+        injectLiveQuote();
+        applyTimeframe(false);
       }
     }catch(e){}
   };
@@ -1524,7 +1534,7 @@ function checkAlerts(price){
       a.triggeredAt = ts().toLocaleString("zh-TW");
       changed = true;
       const text = `${stock} ${a.type==="above"?"突破":"跌破"} ${a.price}（現價 ${fp(price)}）`;
-      showMsg("⚠ 警報：" + text, "ok");
+      showMsg("警報：" + text, "ok");
       appendLog("警報觸發：" + text);
       try{
         if("Notification" in window && Notification.permission==="granted"){
@@ -1548,7 +1558,7 @@ function renderAlerts(){
     div.className = "item";
     div.innerHTML = `
       <div>
-        <div class="p">${a.type==="above"?"▲ 突破":"▼ 跌破"} ${fp(a.price)}</div>
+        <div class="p">${a.type==="above"?"[突破]":"[跌破]"} ${fp(a.price)}</div>
         <div class="id">${a.triggered?"已觸發 "+(a.triggeredAt||""):"監控中"}</div>
       </div>
       <button class="btn" data-act="del">刪除</button>`;
@@ -1583,7 +1593,7 @@ function addAlert(){
 }
 
 /* ==========================================================================
-   自選清單（節流防止 rate limit）
+   自選清單
 ========================================================================== */
 async function renderWatchlist(){
   const list = getWatchlist();
@@ -1604,7 +1614,7 @@ async function renderWatchlist(){
       </div>
       <div style="display:flex;gap:4px;align-items:center">
         <span class="p" id="wlp_${item.id}">---</span>
-        <button class="btn" style="padding:2px 6px;font-size:9px">×</button>
+        <button class="btn" style="padding:2px 6px;font-size:9px">x</button>
       </div>`;
     div.addEventListener("click", e=>{
       if(e.target.tagName==="BUTTON") return;
@@ -1619,7 +1629,6 @@ async function renderWatchlist(){
     wrap.appendChild(div);
   });
 
-  // 序列(節流)取得各自選股現價,避免代理 rate limit
   if(state.watchInflight) return;
   state.watchInflight = true;
   try{
@@ -1677,7 +1686,7 @@ function exportReport(){
   lines.push(`分數 ${p.score.toFixed(3)}、信心 ${p.confidence.toFixed(0)}%`);
   lines.push(`EV 開 ${fp(p.ev_open)} / EV 收 ${fp(p.ev_close)}`);
   lines.push(`TP1 ${fp(p.tp1)}、TP2 ${fp(p.tp2)}、SL ${fp(p.sl)}`);
-  lines.push(`機率：↑${p.prob.up}% / →${p.prob.flat}% / ↓${p.prob.down}%`);
+  lines.push(`機率：漲${p.prob.up}% / 平${p.prob.flat}% / 跌${p.prob.down}%`);
   lines.push("因子權重：");
   p.factors.forEach(f=>{
     lines.push(`  ${f.name}: 訊號 ${f.sig.toFixed(2)}, 權重 ${(f.w*100).toFixed(1)}%`);
@@ -1718,7 +1727,7 @@ function exportReport(){
 }
 
 /* ==========================================================================
-   設定面板（修正點擊面板內元件誤關閉）
+   設定面板
 ========================================================================== */
 function openSettings(){
   const cfg = loadCfg();
@@ -1748,7 +1757,6 @@ function saveSettings(){
    事件綁定
 ========================================================================== */
 function bindEvents(){
-  // 設定面板
   $("settingsBtn").addEventListener("click", (e)=>{
     e.stopPropagation();
     const s = $("settings");
@@ -1757,9 +1765,7 @@ function bindEvents(){
   });
   $("saveCfg").addEventListener("click", saveSettings);
   $("closeCfg").addEventListener("click", closeSettings);
-  // 面板內的點擊不關閉(攔截冒泡)
   $("settings").addEventListener("click", e=> e.stopPropagation());
-  // 點面板外才關閉
   document.addEventListener("click", (e)=>{
     const s = $("settings");
     if(!s.classList.contains("open")) return;
@@ -1767,7 +1773,6 @@ function bindEvents(){
     closeSettings();
   });
 
-  // 時框
   document.querySelectorAll(".tf-btn").forEach(b=>{
     b.addEventListener("click", ()=>{
       if(b.classList.contains("active")) return;
@@ -1778,7 +1783,6 @@ function bindEvents(){
     });
   });
 
-  // 查詢
   $("searchBtn").addEventListener("click", ()=>{
     const v = $("search").value.trim();
     if(v){ loadStock(v); $("search").value=""; }
@@ -1793,11 +1797,9 @@ function bindEvents(){
   $("watchBtn").addEventListener("click", ()=> addWatch(state.stockId));
   $("exportBtn").addEventListener("click", exportReport);
 
-  // 警報
   $("addAlertBtn").addEventListener("click", addAlert);
   $("alertPrice").addEventListener("keydown", e=>{ if(e.key==="Enter") addAlert(); });
 
-  // 自選
   $("wlAddBtn").addEventListener("click", ()=>{
     const v = $("wlInput").value.trim();
     if(v){ addWatch(v); $("wlInput").value=""; }
@@ -1810,11 +1812,9 @@ function bindEvents(){
   });
   $("wlRefreshBtn").addEventListener("click", renderWatchlist);
 
-  // 視窗事件
   window.addEventListener("beforeunload", hardCleanup);
   document.addEventListener("visibilitychange", ()=>{
     if(!document.hidden && state.stockId){
-      // 從背景回到前景,立即更新一次
       fetchTWSELive(state.stockId).then(q=>{
         if(q){ state.liveQuote = q; renderHeader(); checkAlerts(q.price); }
       }).catch(()=>{});
@@ -1843,6 +1843,5 @@ async function init(){
 
 document.addEventListener("DOMContentLoaded", init);
 </script>
-<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4edd5f8ec12a48cfa682ab8261b80a79","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
 </body>
 </html>
