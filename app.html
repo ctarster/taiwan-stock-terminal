@@ -462,7 +462,6 @@ let state = {
   liveQuote: null,
   chips: null,
   margin: null,
-  macro: null,
   pred: null,
   ai: null,
   backtest: null,
@@ -489,7 +488,7 @@ function loadCfg(){
     return {finmindToken:"",groqKey:"",btBars:180,rtSec:15};
   }
 }
-function saveCfg(cfg){
+function saveCfgObj(cfg){
   localStorage.setItem(STORE.cfg, JSON.stringify(cfg));
 }
 function getWatchlist(){
@@ -765,6 +764,11 @@ function adaptiveWeights(rows, ext={}){
   names.forEach(n=>weighted[n] = weighted[n] / total);
   return weighted;
 }
+function factorConsensus(factors){
+  const pos = factors.filter(f=>f.sig>0.15).reduce((a,b)=>a+b.w,0);
+  const neg = factors.filter(f=>f.sig<-0.15).reduce((a,b)=>a+b.w,0);
+  return Math.abs(pos-neg);
+}
 function predictNext(rows, livePrice, ext={}){
   if(!rows.length) return null;
   const i = rows.length - 1;
@@ -798,11 +802,6 @@ function predictNext(rows, livePrice, ext={}){
     factors
   };
 }
-function factorConsensus(factors){
-  const pos = factors.filter(f=>f.sig>0.15).reduce((a,b)=>a+b.w,0);
-  const neg = factors.filter(f=>f.sig<-0.15).reduce((a,b)=>a+b.w,0);
-  return Math.abs(pos-neg);
-}
 
 /* ==========================================================================
    風險 / 回測 / Kelly
@@ -829,7 +828,22 @@ function kellyPosition(winRate, avgWin, avgLoss){
   const b = avgWin/avgLoss;
   const q = 1-winRate;
   const raw = (b*winRate - q) / b;
-  return clamp(raw*0.5, 0, 0.25); // 半 Kelly，上限 25%
+  return clamp(raw*0.5, 0, 0.25);
+}
+function predictAtIndex(rows, i, ext={}){
+  const weights = adaptiveWeights(rows.slice(0,i+1), ext);
+  const sig = factorSignalsAt(rows, i, ext);
+  const factors = Object.keys(weights).map(name=>({name, sig:sig[name], w:weights[name]}));
+  const score = factors.reduce((a,f)=>a+f.sig*f.w,0);
+  const livePrice = rows[i].close;
+  const atr = Math.max(0.01, safeN(rows[i].atr, livePrice*0.02));
+  const mag = atr * (0.55 + Math.abs(score)*1.25);
+  return {
+    score,
+    ev_close: livePrice + score * mag,
+    factors,
+    weights
+  };
 }
 function runBacktest(rows, ext={}, bars=180){
   if(rows.length < 80) return null;
@@ -885,21 +899,6 @@ function runBacktest(rows, ext={}, bars=180){
     lastPred
   };
 }
-function predictAtIndex(rows, i, ext={}){
-  const weights = adaptiveWeights(rows.slice(0,i+1), ext);
-  const sig = factorSignalsAt(rows, i, ext);
-  const factors = Object.keys(weights).map(name=>({name, sig:sig[name], w:weights[name]}));
-  const score = factors.reduce((a,f)=>a+f.sig*f.w,0);
-  const livePrice = rows[i].close;
-  const atr = Math.max(0.01, safeN(rows[i].atr, livePrice*0.02));
-  const mag = atr * (0.55 + Math.abs(score)*1.25);
-  return {
-    score,
-    ev_close: livePrice + score * mag,
-    factors,
-    weights
-  };
-}
 
 /* ==========================================================================
    歷史紀錄 / 命中率
@@ -911,7 +910,6 @@ function updatePredictionArchive(stockId, timeframe, latestRow, pred){
   db[key] = db[key] || [];
   const arr = db[key];
 
-  // 回填上一筆
   if(arr.length){
     const last = arr[arr.length-1];
     if(last && !Number.isFinite(last.actual_close) && last.date !== latestRow.time){
@@ -922,7 +920,6 @@ function updatePredictionArchive(stockId, timeframe, latestRow, pred){
     }
   }
 
-  // 當前最新日期若尚未記錄就新增
   if(!arr.length || arr[arr.length-1].date !== latestRow.time){
     arr.push({
       date: latestRow.time,
@@ -1094,4 +1091,762 @@ async function fetchInstitutional(id){
   }
 }
 async function fetchMargin(id){
-  const start = new Date(); start.setDate(start.getDate()-
+  const start = new Date(); start.setDate(start.getDate()-35);
+  const url = finmindUrl("TaiwanStockMarginPurchaseShortSale", {data_id:id, start_date:dateKey(start)});
+  try{
+    const res = await fetchTimeout(url, {}, 10000);
+    if(!res.ok) throw new Error();
+    const json = await res.json();
+    if(json.msg!=="success" || !json.data?.length) return null;
+    const rows = json.data.sort((a,b)=>a.date.localeCompare(b.date));
+    const last = rows[rows.length-1];
+    const prev = rows.length>=2 ? rows[rows.length-2] : last;
+    const marginBal = safeN(last.MarginPurchaseTodayBalance ?? last.margin_purchase_today_balance);
+    const marginPrev = safeN(prev.MarginPurchaseTodayBalance ?? prev.margin_purchase_today_balance);
+    const shortBal = safeN(last.ShortSaleTodayBalance ?? last.short_sale_today_balance);
+    const shortRatio = marginBal>0 ? (shortBal/marginBal)*100 : 0;
+    return {
+      date: last.date,
+      marginBal,
+      marginDelta: marginBal - marginPrev,
+      shortBal,
+      shortRatio
+    };
+  }catch{
+    return null;
+  }
+}
+async function callGroqAI(prompt){
+  const cfg = loadCfg();
+  if(!cfg.groqKey) return null;
+  try{
+    const res = await fetchTimeout("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type":"application/json",
+        "Authorization":`Bearer ${cfg.groqKey}`
+      },
+      body: JSON.stringify({
+        model:"llama-3.3-70b-versatile",
+        messages:[
+          {role:"system",content:"你是專業的台股量化分析助手，請用繁體中文回應，不超過 220 字，著重在多空判讀、關鍵價位、風險提醒。"},
+          {role:"user",content:prompt}
+        ],
+        temperature:0.4,
+        max_tokens:380
+      })
+    }, 15000);
+    if(!res.ok) return null;
+    const json = await res.json();
+    return json?.choices?.[0]?.message?.content || null;
+  }catch{
+    return null;
+  }
+}
+
+/* ==========================================================================
+   渲染：頭部 / 預測 / 籌碼 / 風險 / 模型驗證 / 因子表
+========================================================================== */
+function renderHeader(){
+  $("name").textContent = state.stockName || KNOWN[state.stockId] || state.stockId;
+  $("sid").textContent = state.stockId;
+  const q = state.liveQuote;
+  if(q){
+    const up = q.change >= 0;
+    $("price").textContent = fp(q.price);
+    $("price").style.color = up ? "var(--red)" : "var(--green)";
+    $("delta").style.color = up ? "var(--red)" : "var(--green)";
+    $("chg").textContent = fc(q.change);
+    $("pct").textContent = fpc(q.percent);
+    $("live-dot").style.background = isTradingHour() ? "var(--green)" : "var(--yellow)";
+    $("status").textContent = isTradingHour() ? "盤中即時" : "盤後";
+    $("rtPrice").textContent = fp(q.price);
+    $("rtDelta").textContent = fc(q.change) + " (" + fpc(q.percent) + ")";
+    $("rtDelta").style.color = up ? "var(--red)" : "var(--green)";
+    $("rtVol").textContent = fv(q.volume);
+    $("rtTime").textContent = ts().toLocaleTimeString("zh-TW");
+    $("rtStatus").textContent = q.source || "TWSE";
+  }
+}
+function renderOhlc(){
+  const r = state.enriched[state.enriched.length-1];
+  if(!r) return;
+  $("oO").textContent = fp(r.open);
+  $("oH").textContent = fp(r.high);
+  $("oL").textContent = fp(r.low);
+  $("oC").textContent = fp(r.close);
+  $("oV").textContent = fv(r.volume);
+  $("oM5").textContent = fp(r.ma5);
+  $("oM20").textContent = fp(r.ma20);
+  $("oM60").textContent = fp(r.ma60);
+  $("fATR").textContent = fp(r.atr);
+  $("fRSI").textContent = fp(r.rsi);
+  $("fBB").textContent = fp(r.bbPct);
+  $("fDIF").textContent = fp(r.dif);
+  $("fDEA").textContent = fp(r.dea);
+  $("fHist").textContent = fp(r.hist);
+  $("fK").textContent = fp(r.k);
+  $("fD").textContent = fp(r.d);
+  $("fJ").textContent = fp(r.j);
+  $("tfLabel").textContent = state.timeframe;
+}
+function renderPrediction(){
+  const p = state.pred;
+  if(!p) return;
+  $("pOpen").textContent = fp(p.ev_open);
+  $("pClose").textContent = fp(p.ev_close);
+  $("pTp1").textContent = fp(p.tp1);
+  $("pTp2").textContent = fp(p.tp2);
+  $("pSl").textContent = fp(p.sl);
+  $("pConf").textContent = (p.confidence).toFixed(0) + "%";
+  $("probText").textContent = `↑${p.prob.up}% ／ →${p.prob.flat}% ／ ↓${p.prob.down}%`;
+  $("probFill").style.width = p.prob.up + "%";
+  $("lastScore").textContent = (p.score>=0?"+":"") + p.score.toFixed(3);
+
+  const tbody = $("factorRows");
+  tbody.innerHTML = "";
+  const labelMap = {
+    rsi:"RSI 動能", macd:"MACD 趨勢", kdj:"KDJ 震盪", bb:"布林位置",
+    vol:"量價", ma:"均線結構", chip:"三大法人", margin:"融資融券"
+  };
+  p.factors.sort((a,b)=>b.w-a.w).forEach(f=>{
+    const tr = document.createElement("tr");
+    const cls = f.sig>0.15 ? "factorPos" : f.sig<-0.15 ? "factorNeg" : "factorNeu";
+    const arrow = f.sig>0.15 ? "▲ 偏多" : f.sig<-0.15 ? "▼ 偏空" : "■ 中性";
+    tr.innerHTML = `<td>${labelMap[f.name]||f.name}</td>
+      <td class="${cls}">${arrow} ${f.sig.toFixed(2)}</td>
+      <td>${(f.w*100).toFixed(1)}%</td>`;
+    tbody.appendChild(tr);
+  });
+}
+function renderChips(){
+  const c = state.chips, m = state.margin;
+  if(c){
+    $("chipDate").textContent = c.date || "---";
+    $("chipForeign").textContent = fv(c.foreign) + " 張";
+    $("chipForeign").style.color = c.foreign>=0 ? "var(--red)" : "var(--green)";
+    $("chipTrust").textContent = fv(c.trust) + " 張";
+    $("chipTrust").style.color = c.trust>=0 ? "var(--red)" : "var(--green)";
+    $("chipDealer").textContent = fv(c.dealer) + " 張";
+    $("chipDealer").style.color = c.dealer>=0 ? "var(--red)" : "var(--green)";
+    $("chipTotal").textContent = fv(c.total) + " 張";
+    $("chipTotal").style.color = c.total>=0 ? "var(--red)" : "var(--green)";
+  }else{
+    ["chipForeign","chipTrust","chipDealer","chipTotal"].forEach(id=>$(id).textContent="---");
+  }
+  if(m){
+    $("marginBal").textContent = fv(m.marginBal) + " 張";
+    $("marginChg").textContent = fc(m.marginDelta) + " 張";
+    $("marginChg").style.color = m.marginDelta>=0 ? "var(--red)" : "var(--green)";
+    $("shortBal").textContent = fv(m.shortBal) + " 張";
+    $("shortRatio").textContent = m.shortRatio.toFixed(2) + "%";
+  }else{
+    ["marginBal","marginChg","shortBal","shortRatio"].forEach(id=>$(id).textContent="---");
+  }
+  const lines = [];
+  if(c) lines.push(`三大法人合計 ${c.total>=0?"+":""}${fv(c.total)} 張，外資為主導力量 (${c.foreign>=0?"買超":"賣超"} ${fv(Math.abs(c.foreign))} 張)。`);
+  if(m) lines.push(`融資${m.marginDelta>=0?"增":"減"} ${fv(Math.abs(m.marginDelta))} 張，券資比 ${m.shortRatio.toFixed(2)}%。`);
+  $("chipSummary").textContent = lines.join(" ") || "尚無籌碼資料。";
+}
+function renderRisk(){
+  const rows = state.enriched;
+  if(!rows.length) return;
+  const av = annualizedVol(rows);
+  const bt = state.backtest;
+  const mdd = bt ? bt.maxDD : 0;
+  const kelly = bt ? bt.kelly : 0;
+  let score = 50;
+  score += av>0.45 ? 18 : av>0.30 ? 8 : -6;
+  score += mdd>0.30 ? 16 : mdd>0.20 ? 8 : -4;
+  score += state.pred && Math.abs(state.pred.score) > 0.4 ? 6 : 0;
+  score = clamp(score, 0, 100);
+
+  $("kellyPct").textContent = (kelly*100).toFixed(1) + "%";
+  $("maxDD").textContent = (mdd*100).toFixed(1) + "%";
+  $("annVol").textContent = (av*100).toFixed(1) + "%";
+  $("riskScore").textContent = score.toFixed(0);
+
+  const badge = $("riskBadge");
+  if(score>=70){ badge.className="badge badge-red"; badge.textContent="高風險"; }
+  else if(score>=50){ badge.className="badge badge-yellow"; badge.textContent="中等風險"; }
+  else{ badge.className="badge badge-green"; badge.textContent="正常"; }
+
+  $("riskText").textContent =
+    `年化波動 ${(av*100).toFixed(1)}%、歷史最大回撤 ${(mdd*100).toFixed(1)}%。` +
+    `建議單筆倉位 ${(kelly*100).toFixed(1)}%（半 Kelly，已上限 25%）。`;
+}
+function renderArchive(){
+  const s = state.archiveStats;
+  if(!s) return;
+  $("hitRate").textContent = s.n ? (s.hitRate*100).toFixed(1) + "%" : "---";
+  $("avgErr").textContent = s.n ? (s.avgErr*100).toFixed(2) + "%" : "---";
+  $("verifiedN").textContent = s.n + " 筆";
+  $("archiveText").textContent = s.n
+    ? `已累積 ${s.n} 筆已驗證紀錄，方向命中率 ${(s.hitRate*100).toFixed(1)}%，平均收盤誤差 ${(s.avgErr*100).toFixed(2)}%。`
+    : "尚未累積足夠驗證資料，請每日盤後重新整理。";
+}
+function renderBacktest(){
+  const b = state.backtest;
+  const badge = $("btBadge");
+  if(!b){
+    badge.className = "badge badge-red";
+    badge.textContent = "未執行";
+    return;
+  }
+  $("btReturn").textContent = (b.totalReturn*100).toFixed(2) + "%";
+  $("btReturn").style.color = b.totalReturn>=0 ? "var(--red)" : "var(--green)";
+  $("btWin").textContent = (b.winRate*100).toFixed(1) + "%";
+  $("btPF").textContent = b.profitFactor.toFixed(2);
+  $("btSharpe").textContent = b.sharpeLike.toFixed(2);
+  badge.className = "badge " + (b.totalReturn>=0 ? "badge-green" : "badge-red");
+  badge.textContent = `${b.trades} 筆`;
+  $("backtestText").textContent =
+    `回測 ${b.trades} 筆交易，勝率 ${(b.winRate*100).toFixed(1)}%、` +
+    `Profit Factor ${b.profitFactor.toFixed(2)}、Sharpe-like ${b.sharpeLike.toFixed(2)}、` +
+    `平均誤差 ${(b.avgErr*100).toFixed(2)}%、最大回撤 ${(b.maxDD*100).toFixed(1)}%。`;
+}
+function renderAI(text, fromAI=false){
+  $("aiText").textContent = text || "尚無分析。";
+  const badge = $("aiBadge");
+  badge.className = "badge " + (fromAI ? "badge-green" : "badge-blue");
+  badge.textContent = fromAI ? "Groq AI" : "本地分析";
+}
+
+/* ==========================================================================
+   圖表
+========================================================================== */
+function buildCharts(){
+  cleanupCharts();
+  const common = {
+    layout:{background:{color:"#05070b"},textColor:"#9aa3af"},
+    grid:{vertLines:{color:"#11161f"},horzLines:{color:"#11161f"}},
+    rightPriceScale:{borderColor:"#1d2633"},
+    timeScale:{borderColor:"#1d2633",timeVisible:false,secondsVisible:false},
+    crosshair:{mode:1}
+  };
+  state.charts.c1 = LightweightCharts.createChart($("c1"), {...common, height:$("c1").clientHeight});
+  state.charts.c2 = LightweightCharts.createChart($("c2"), {...common, height:$("c2").clientHeight});
+  state.charts.c3 = LightweightCharts.createChart($("c3"), {...common, height:$("c3").clientHeight});
+  state.charts.c4 = LightweightCharts.createChart($("c4"), {...common, height:$("c4").clientHeight});
+
+  state.series.candle = state.charts.c1.addCandlestickSeries({
+    upColor:"#ef4444", downColor:"#22c55e",
+    borderUpColor:"#ef4444", borderDownColor:"#22c55e",
+    wickUpColor:"#ef4444", wickDownColor:"#22c55e"
+  });
+  state.series.ma5 = state.charts.c1.addLineSeries({color:"#f59e0b",lineWidth:1});
+  state.series.ma20 = state.charts.c1.addLineSeries({color:"#3b82f6",lineWidth:1});
+  state.series.ma60 = state.charts.c1.addLineSeries({color:"#8b5cf6",lineWidth:1});
+
+  state.series.vol = state.charts.c2.addHistogramSeries({priceFormat:{type:"volume"}});
+
+  state.series.dif = state.charts.c3.addLineSeries({color:"#06b6d4",lineWidth:1});
+  state.series.dea = state.charts.c3.addLineSeries({color:"#f59e0b",lineWidth:1});
+  state.series.hist = state.charts.c3.addHistogramSeries({});
+
+  state.series.k = state.charts.c4.addLineSeries({color:"#ef4444",lineWidth:1});
+  state.series.d = state.charts.c4.addLineSeries({color:"#22c55e",lineWidth:1});
+  state.series.j = state.charts.c4.addLineSeries({color:"#8b5cf6",lineWidth:1});
+
+  [state.charts.c1, state.charts.c2, state.charts.c3, state.charts.c4].forEach((c,idx,arr)=>{
+    c.timeScale().subscribeVisibleLogicalRangeChange(r=>{
+      if(!r) return;
+      arr.forEach(o=>{ if(o!==c) try{ o.timeScale().setVisibleLogicalRange(r); }catch{} });
+    });
+  });
+
+  state.resizeObserver = new ResizeObserver(()=>{
+    Object.entries(state.charts).forEach(([key,chart])=>{
+      const el = $(key);
+      if(el && chart) chart.applyOptions({width: el.clientWidth, height: el.clientHeight});
+    });
+  });
+  ["c1","c2","c3","c4"].forEach(id=> state.resizeObserver.observe($(id)));
+}
+function setChartsData(){
+  const rows = state.enriched;
+  if(!rows.length) return;
+  const candle = rows.map(r=>({time:r.time, open:r.open, high:r.high, low:r.low, close:r.close}));
+  const mkLine = (key)=>rows.filter(r=>Number.isFinite(r[key])).map(r=>({time:r.time, value:r[key]}));
+  state.series.candle.setData(candle);
+  state.series.ma5.setData(mkLine("ma5"));
+  state.series.ma20.setData(mkLine("ma20"));
+  state.series.ma60.setData(mkLine("ma60"));
+  state.series.vol.setData(rows.map(r=>({
+    time:r.time, value:r.volume,
+    color: r.close>=r.open ? "rgba(239,68,68,.55)" : "rgba(34,197,94,.55)"
+  })));
+  state.series.dif.setData(rows.map(r=>({time:r.time, value:safeN(r.dif)})));
+  state.series.dea.setData(rows.map(r=>({time:r.time, value:safeN(r.dea)})));
+  state.series.hist.setData(rows.map(r=>({
+    time:r.time, value:safeN(r.hist),
+    color: r.hist>=0 ? "rgba(239,68,68,.6)" : "rgba(34,197,94,.6)"
+  })));
+  state.series.k.setData(rows.map(r=>({time:r.time, value:safeN(r.k)})));
+  state.series.d.setData(rows.map(r=>({time:r.time, value:safeN(r.d)})));
+  state.series.j.setData(rows.map(r=>({time:r.time, value:safeN(r.j)})));
+
+  try{ state.charts.c1.timeScale().fitContent(); }catch{}
+}
+
+/* ==========================================================================
+   主流程
+========================================================================== */
+async function loadStock(id, opts={}){
+  const token = ++state.loadToken;
+  id = String(id).trim();
+  if(!/^\d{4,6}$/.test(id)){
+    showMsg("代號格式錯誤", "err");
+    return;
+  }
+  state.stockId = id;
+  state.stockName = KNOWN[id] || id;
+  renderHeader();
+  setLoadingSkeleton();
+  appendLog(`開始載入 ${id}…`);
+
+  try{
+    const [history, live, chips, margin] = await Promise.all([
+      fetchHistory(id).catch(e=>{ throw e; }),
+      fetchTWSELive(id).catch(()=>null),
+      fetchInstitutional(id).catch(()=>null),
+      fetchMargin(id).catch(()=>null)
+    ]);
+    if(token !== state.loadToken) return; // 被新的請求覆蓋
+
+    state.rawRows = history;
+    state.chips = chips;
+    state.margin = margin;
+    if(live && live.name) state.stockName = live.name.replace(/\s+/g,"");
+    state.liveQuote = live || {
+      price: history[history.length-1].close,
+      change: history[history.length-1].close - history[history.length-2].close,
+      percent: ((history[history.length-1].close - history[history.length-2].close) / history[history.length-2].close) * 100,
+      open: history[history.length-1].open,
+      high: history[history.length-1].high,
+      low: history[history.length-1].low,
+      volume: history[history.length-1].volume,
+      source: "歷史收盤"
+    };
+
+    applyTimeframe();
+    renderHeader();
+    renderChips();
+    appendLog(`資料載入完成：歷史 ${history.length} 筆、籌碼 ${chips?"有":"無"}、融資 ${margin?"有":"無"}。`);
+    if(!opts.skipAI) refreshAI();
+  }catch(e){
+    showMsg("讀取失敗：" + (e.message||"未知錯誤"), "err");
+    appendLog("錯誤：" + (e.message||e));
+  }
+}
+function applyTimeframe(){
+  if(!state.rawRows.length) return;
+  state.viewRows = aggregateRows(state.rawRows, state.timeframe);
+  state.enriched = enrichRows(state.viewRows);
+
+  const cfg = loadCfg();
+  const ext = {
+    chipNet: state.chips ? state.chips.total : 0,
+    marginDelta: state.margin ? state.margin.marginDelta : 0,
+    shortRatio: state.margin ? state.margin.shortRatio : 0
+  };
+  const livePrice = state.liveQuote ? state.liveQuote.price : state.enriched[state.enriched.length-1].close;
+  state.pred = predictNext(state.enriched, livePrice, ext);
+  state.backtest = runBacktest(state.enriched, ext, cfg.btBars);
+  state.archiveStats = calcArchiveStats(state.stockId, state.timeframe);
+
+  // 累積預測歷史（僅日線）
+  if(state.timeframe === "D" && state.pred){
+    updatePredictionArchive(state.stockId, "D", state.enriched[state.enriched.length-1], state.pred);
+    state.archiveStats = calcArchiveStats(state.stockId, "D");
+  }
+
+  buildCharts();
+  setChartsData();
+  renderOhlc();
+  renderPrediction();
+  renderRisk();
+  renderArchive();
+  renderBacktest();
+  renderAI(buildLocalSummary(), false);
+}
+function buildLocalSummary(){
+  const p = state.pred; if(!p) return "尚無資料";
+  const dir = p.score>0.12 ? "偏多" : p.score<-0.12 ? "偏空" : "中性";
+  const top = [...p.factors].sort((a,b)=>Math.abs(b.sig*b.w)-Math.abs(a.sig*a.w)).slice(0,3)
+    .map(f=>`${f.name}(${(f.sig*f.w*100).toFixed(1)})`).join("、");
+  return `本地多因子模型判斷：${dir}，綜合分數 ${p.score.toFixed(3)}，信心 ${p.confidence.toFixed(0)}%。\n`+
+         `主導因子：${top}。\n`+
+         `EV 收盤 ${fp(p.ev_close)}，TP1 ${fp(p.tp1)} / TP2 ${fp(p.tp2)} / SL ${fp(p.sl)}。\n`+
+         `機率分佈 ↑${p.prob.up}% / →${p.prob.flat}% / ↓${p.prob.down}%。`;
+}
+async function refreshAI(){
+  if(!state.pred) return;
+  const cfg = loadCfg();
+  if(!cfg.groqKey){
+    renderAI(buildLocalSummary(), false);
+    return;
+  }
+  const p = state.pred;
+  const r = state.enriched[state.enriched.length-1];
+  const c = state.chips, m = state.margin;
+  const prompt =
+`股票：${state.stockName}(${state.stockId})，時框：${state.timeframe}
+現價：${fp(state.liveQuote?.price)}，今日漲跌 ${fpc(state.liveQuote?.percent)}
+技術：RSI ${fp(r.rsi)}、MACD DIF ${fp(r.dif)}/DEA ${fp(r.dea)}、K ${fp(r.k)}/D ${fp(r.d)}、BB% ${fp(r.bbPct)}、ATR ${fp(r.atr)}
+均線：MA5 ${fp(r.ma5)}、MA20 ${fp(r.ma20)}、MA60 ${fp(r.ma60)}
+籌碼：外資 ${fv(c?.foreign)}、投信 ${fv(c?.trust)}、自營 ${fv(c?.dealer)}（合計 ${fv(c?.total)}）
+融資：餘額 ${fv(m?.marginBal)}、增減 ${fv(m?.marginDelta)}、券資比 ${fp(m?.shortRatio)}%
+模型：分數 ${p.score.toFixed(3)}、信心 ${p.confidence.toFixed(0)}%、EV ${fp(p.ev_close)}、TP1 ${fp(p.tp1)} / SL ${fp(p.sl)}
+請給出：1) 多空判讀  2) 關鍵支撐/壓力  3) 風險提醒  4) 是否同意模型結論。`;
+  appendLog("呼叫 Groq AI…");
+  const text = await callGroqAI(prompt);
+  if(text){
+    renderAI(text, true);
+    appendLog("AI 回應完成。");
+  }else{
+    renderAI(buildLocalSummary() + "\n\n(AI 呼叫失敗或未設定金鑰，顯示本地分析。)", false);
+    appendLog("AI 呼叫失敗，使用本地分析。");
+  }
+}
+
+/* ==========================================================================
+   即時輪詢 / 警報
+========================================================================== */
+function startRealtime(){
+  clearAllTimers();
+  const cfg = loadCfg();
+  const sec = Math.max(5, +cfg.rtSec || 15);
+  const tick = async ()=>{
+    if(!state.stockId) return;
+    const live = await fetchTWSELive(state.stockId);
+    if(live){
+      state.liveQuote = live;
+      renderHeader();
+      checkAlerts(live.price);
+    }
+  };
+  tick();
+  registerTimer(setInterval(tick, sec*1000));
+}
+function checkAlerts(price){
+  const alerts = getAlerts();
+  const stock = state.stockId;
+  let changed = false;
+  alerts.forEach(a=>{
+    if(a.stock !== stock || a.triggered) return;
+    if((a.type==="above" && price >= a.price) || (a.type==="below" && price <= a.price)){
+      a.triggered = true;
+      a.triggeredAt = ts().toLocaleString("zh-TW");
+      changed = true;
+      const text = `${stock} ${a.type==="above"?"突破":"跌破"} ${a.price}（現價 ${fp(price)}）`;
+      showMsg("⚠ 警報：" + text, "ok");
+      appendLog("警報觸發：" + text);
+      try{
+        if("Notification" in window && Notification.permission==="granted"){
+          new Notification("量化決策警報", {body:text});
+        }
+      }catch{}
+    }
+  });
+  if(changed){ setAlerts(alerts); renderAlerts(); }
+}
+function renderAlerts(){
+  const list = getAlerts().filter(a=>a.stock===state.stockId);
+  const wrap = $("alertsList");
+  wrap.innerHTML = "";
+  if(!list.length){
+    wrap.innerHTML = `<div class="note" style="padding:6px 4px">尚未設定警報</div>`;
+    return;
+  }
+  list.forEach((a,i)=>{
+    const div = document.createElement("div");
+    div.className = "item";
+    div.innerHTML = `
+      <div>
+        <div class="p">${a.type==="above"?"▲ 突破":"▼ 跌破"} ${fp(a.price)}</div>
+        <div class="id">${a.triggered?"已觸發 "+(a.triggeredAt||""):"監控中"}</div>
+      </div>
+      <button class="btn" data-i="${i}">刪除</button>`;
+    div.querySelector("button").addEventListener("click", e=>{
+      e.stopPropagation();
+      const all = getAlerts();
+      const idx = all.findIndex(x=>x.stock===a.stock && x.type===a.type && x.price===a.price && x.createdAt===a.createdAt);
+      if(idx>=0){ all.splice(idx,1); setAlerts(all); renderAlerts(); }
+    });
+    wrap.appendChild(div);
+  });
+}
+function addAlert(){
+  const t = $("alertType").value;
+  const p = parseFloat($("alertPrice").value);
+  if(!Number.isFinite(p) || p<=0){
+    showMsg("請輸入有效的價格", "err");
+    return;
+  }
+  const all = getAlerts();
+  all.push({
+    stock: state.stockId, type:t, price:p, triggered:false,
+    createdAt: ts().toLocaleString("zh-TW")
+  });
+  setAlerts(all);
+  $("alertPrice").value = "";
+  renderAlerts();
+  showMsg("警報已新增", "ok");
+  try{
+    if("Notification" in window && Notification.permission==="default") Notification.requestPermission();
+  }catch{}
+}
+
+/* ==========================================================================
+   自選清單
+========================================================================== */
+async function renderWatchlist(){
+  const list = getWatchlist();
+  $("wlCount").textContent = list.length;
+  const wrap = $("watchList");
+  wrap.innerHTML = "";
+  if(!list.length){
+    wrap.innerHTML = `<div class="note" style="padding:6px 4px">清單為空，輸入代號加入</div>`;
+    return;
+  }
+  list.forEach(item=>{
+    const div = document.createElement("div");
+    div.className = "item" + (item.id===state.stockId ? " active" : "");
+    div.innerHTML = `
+      <div>
+        <div class="p">${item.name||item.id}</div>
+        <div class="id">${item.id}</div>
+      </div>
+      <div style="display:flex;gap:4px;align-items:center">
+        <span class="p" id="wlp_${item.id}">---</span>
+        <button class="btn" style="padding:2px 6px;font-size:9px">×</button>
+      </div>`;
+    div.addEventListener("click", e=>{
+      if(e.target.tagName==="BUTTON") return;
+      loadStock(item.id);
+    });
+    div.querySelector("button").addEventListener("click", e=>{
+      e.stopPropagation();
+      const l = getWatchlist().filter(x=>x.id!==item.id);
+      setWatchlist(l);
+      renderWatchlist();
+    });
+    wrap.appendChild(div);
+  });
+  // 非同步取得各自選股現價
+  for(const item of list){
+    fetchTWSELive(item.id).then(q=>{
+      const el = $("wlp_"+item.id);
+      if(!el || !q) return;
+      el.textContent = fp(q.price);
+      el.style.color = q.change>=0 ? "var(--red)" : "var(--green)";
+    }).catch(()=>{});
+  }
+}
+function addWatch(id){
+  id = String(id).trim();
+  if(!/^\d{4,6}$/.test(id)){
+    showMsg("代號格式錯誤", "err");
+    return;
+  }
+  const list = getWatchlist();
+  if(list.find(x=>x.id===id)){
+    showMsg("已在清單中", "err");
+    return;
+  }
+  list.push({id, name: KNOWN[id]||id});
+  setWatchlist(list);
+  renderWatchlist();
+  showMsg("已加入自選", "ok");
+}
+
+/* ==========================================================================
+   匯出報告
+========================================================================== */
+function exportReport(){
+  const p = state.pred, b = state.backtest, s = state.archiveStats;
+  const r = state.enriched[state.enriched.length-1];
+  if(!p || !r){ showMsg("尚無分析資料", "err"); return; }
+  const lines = [];
+  lines.push(`量化決策報告 — ${state.stockName}(${state.stockId})`);
+  lines.push(`產生時間：${ts().toLocaleString("zh-TW")}`);
+  lines.push(`時框：${state.timeframe}`);
+  lines.push("");
+  lines.push("【現價 / 技術】");
+  lines.push(`現價 ${fp(state.liveQuote?.price)}，漲跌 ${fc(state.liveQuote?.change)} (${fpc(state.liveQuote?.percent)})`);
+  lines.push(`O/H/L/C：${fp(r.open)} / ${fp(r.high)} / ${fp(r.low)} / ${fp(r.close)}，量 ${fv(r.volume)}`);
+  lines.push(`MA5/MA20/MA60：${fp(r.ma5)} / ${fp(r.ma20)} / ${fp(r.ma60)}`);
+  lines.push(`RSI ${fp(r.rsi)}、MACD ${fp(r.dif)}/${fp(r.dea)}、K/D/J ${fp(r.k)}/${fp(r.d)}/${fp(r.j)}、BB% ${fp(r.bbPct)}、ATR ${fp(r.atr)}`);
+  lines.push("");
+  lines.push("【預測】");
+  lines.push(`分數 ${p.score.toFixed(3)}、信心 ${p.confidence.toFixed(0)}%`);
+  lines.push(`EV 開 ${fp(p.ev_open)} / EV 收 ${fp(p.ev_close)}`);
+  lines.push(`TP1 ${fp(p.tp1)}、TP2 ${fp(p.tp2)}、SL ${fp(p.sl)}`);
+  lines.push(`機率：↑${p.prob.up}% / →${p.prob.flat}% / ↓${p.prob.down}%`);
+  lines.push("因子權重：");
+  p.factors.forEach(f=>{
+    lines.push(`  ${f.name}: 訊號 ${f.sig.toFixed(2)}, 權重 ${(f.w*100).toFixed(1)}%`);
+  });
+  lines.push("");
+  if(state.chips){
+    lines.push("【籌碼】");
+    lines.push(`日期 ${state.chips.date}，外資 ${fv(state.chips.foreign)}、投信 ${fv(state.chips.trust)}、自營 ${fv(state.chips.dealer)}（合計 ${fv(state.chips.total)}）`);
+  }
+  if(state.margin){
+    lines.push(`融資餘額 ${fv(state.margin.marginBal)}、增減 ${fv(state.margin.marginDelta)}、券資比 ${fp(state.margin.shortRatio)}%`);
+  }
+  lines.push("");
+  if(b){
+    lines.push("【回測】");
+    lines.push(`交易 ${b.trades} 筆、勝率 ${(b.winRate*100).toFixed(1)}%、PF ${b.profitFactor.toFixed(2)}、Sharpe-like ${b.sharpeLike.toFixed(2)}`);
+    lines.push(`總報酬 ${(b.totalReturn*100).toFixed(2)}%、最大回撤 ${(b.maxDD*100).toFixed(1)}%、Kelly ${(b.kelly*100).toFixed(1)}%`);
+  }
+  if(s && s.n){
+    lines.push("");
+    lines.push("【模型驗證】");
+    lines.push(`已驗證 ${s.n} 筆，方向命中率 ${(s.hitRate*100).toFixed(1)}%，平均誤差 ${(s.avgErr*100).toFixed(2)}%`);
+  }
+  lines.push("");
+  lines.push("【AI 分析】");
+  lines.push($("aiText").textContent);
+
+  const blob = new Blob([lines.join("\n")], {type:"text/plain;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${state.stockId}_${state.stockName}_${dateKey(new Date())}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  showMsg("報告已匯出", "ok");
+}
+
+/* ==========================================================================
+   設定面板 — 修正核心
+========================================================================== */
+function openSettings(){
+  const cfg = loadCfg();
+  $("fmToken").value = cfg.finmindToken || "";
+  $("groqKey").value = cfg.groqKey || "";
+  $("btBars").value = String(cfg.btBars || 180);
+  $("rtSec").value = String(cfg.rtSec || 15);
+  $("settings").classList.add("open");
+}
+function closeSettings(){
+  $("settings").classList.remove("open");
+}
+function saveSettings(){
+  const cfg = {
+    finmindToken: $("fmToken").value.trim(),
+    groqKey: $("groqKey").value.trim(),
+    btBars: parseInt($("btBars").value, 10) || 180,
+    rtSec: parseInt($("rtSec").value, 10) || 15
+  };
+  saveCfgObj(cfg);
+  showMsg("設定已儲存", "ok");
+  appendLog(`設定更新：FinMind=${cfg.finmindToken?"已設定":"未設定"}, Groq=${cfg.groqKey?"已設定":"未設定"}, 回測=${cfg.btBars}, 即時=${cfg.rtSec}s`);
+  closeSettings();
+  // 重新啟動輪詢以套用新秒數
+  startRealtime();
+  // 重新跑回測以套用新樣本數
+  if(state.rawRows.length){
+    applyTimeframe();
+  }
+}
+
+/* ==========================================================================
+   事件綁定 / 初始化
+========================================================================== */
+function bindEvents(){
+  // 設定面板（重點修正）
+  $("settingsBtn").addEventListener("click", (e)=>{
+    e.stopPropagation();
+    const s = $("settings");
+    if(s.classList.contains("open")) closeSettings();
+    else openSettings();
+  });
+  $("saveCfg").addEventListener("click", saveSettings);
+  $("closeCfg").addEventListener("click", closeSettings);
+  // 點面板外關閉
+  document.addEventListener("click", (e)=>{
+    const s = $("settings");
+    if(!s.classList.contains("open")) return;
+    if(s.contains(e.target) || e.target.id==="settingsBtn") return;
+    closeSettings();
+  });
+
+  // 時框
+  document.querySelectorAll(".tf-btn").forEach(b=>{
+    b.addEventListener("click", ()=>{
+      document.querySelectorAll(".tf-btn").forEach(x=>x.classList.remove("active"));
+      b.classList.add("active");
+      state.timeframe = b.dataset.tf;
+      if(state.rawRows.length) applyTimeframe();
+    });
+  });
+
+  // 查詢
+  $("searchBtn").addEventListener("click", ()=>{
+    const v = $("search").value.trim();
+    if(v) loadStock(v);
+  });
+  $("search").addEventListener("keydown", e=>{
+    if(e.key==="Enter"){
+      const v = $("search").value.trim();
+      if(v) loadStock(v);
+    }
+  });
+
+  // 加入追蹤
+  $("watchBtn").addEventListener("click", ()=> addWatch(state.stockId));
+
+  // 匯出
+  $("exportBtn").addEventListener("click", exportReport);
+
+  // 警報
+  $("addAlertBtn").addEventListener("click", addAlert);
+  $("alertPrice").addEventListener("keydown", e=>{ if(e.key==="Enter") addAlert(); });
+
+  // 自選
+  $("wlAddBtn").addEventListener("click", ()=>{
+    const v = $("wlInput").value.trim();
+    if(v){ addWatch(v); $("wlInput").value=""; }
+  });
+  $("wlInput").addEventListener("keydown", e=>{
+    if(e.key==="Enter"){
+      const v = $("wlInput").value.trim();
+      if(v){ addWatch(v); $("wlInput").value=""; }
+    }
+  });
+  $("wlRefreshBtn").addEventListener("click", renderWatchlist);
+
+  // 視窗關閉時清理
+  window.addEventListener("beforeunload", hardCleanup);
+}
+
+async function init(){
+  try{
+    bindEvents();
+    setLog("系統初始化完成。\n預設載入：3481 群創。");
+    renderAlerts();
+    renderWatchlist();
+    await loadStock("3481");
+    startRealtime();
+    // 通知權限
+    try{
+      if("Notification" in window && Notification.permission==="default"){
+        Notification.requestPermission();
+      }
+    }catch{}
+  }catch(e){
+    showMsg("初始化失敗：" + (e.message||e), "err");
+    appendLog("初始化錯誤：" + (e.message||e));
+  }
+}
+
+document.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>
