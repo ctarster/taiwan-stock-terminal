@@ -2713,9 +2713,11 @@ async function runSelftest(silent=false){
 
   // ── 9. 防禦層健檢（_SINK 不該被當作真實節點）──
   try{
-    const sink=$("definitely-not-exist-id-xyz");
+    // 預先加入已警告集合，避免測試本身產生 console.warn 噪音
+    const fakeId="__selftest_fake_id__";
+    _missingIds.add(fakeId);
+    const sink=$(fakeId);
     !$.isReal(sink) ? ok("DOM 防禦層：缺失 id 不誤判為真實節點") : fail("DOM 防禦層異常");
-    // sink 應吸收賦值不拋
     let threw=false; try{ sink.textContent="x"; sink.style.color="red"; }catch{ threw=true; }
     !threw ? ok("DOM sink 吸收賦值") : fail("DOM sink 賦值拋錯");
   }catch(e){fail("DOM 防禦層",e.message);}
