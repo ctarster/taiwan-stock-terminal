@@ -1257,11 +1257,16 @@ function recordTodayPrice(q){
 }
 
 function normNet(r){
-  if("buy_sell" in r) return sn(r.buy_sell);
-  if("net_buy_sell" in r) return sn(r.net_buy_sell);
-  if("buy" in r||"sell" in r) return sn(r.buy)-sn(r.sell);
-  if("buy_volume" in r||"sell_volume" in r) return sn(r.buy_volume)-sn(r.sell_volume);
-  return 0;
+ // FinMind 回傳買賣超（股數），需÷1000換算成張
+  const RAW_THRESH=10000; // 若絕對值>此值視為股，否則已是張
+  let v=0;
+  if("buy_sell" in r) v=sn(r.buy_sell);
+  else if("net_buy_sell" in r) v=sn(r.net_buy_sell);
+  else if("Buy" in r||"Sell" in r) v=sn(r.Buy)-sn(r.Sell);
+  else if("buy" in r||"sell" in r) v=sn(r.buy)-sn(r.sell);
+  else if("buy_volume" in r||"sell_volume" in r) v=sn(r.buy_volume)-sn(r.sell_volume);
+  // 若數值看起來是股（絕對值>閾值 1000）則自動換算
+  return Math.abs(v)>=RAW_THRESH ? Math.round(v/1000) : v; 
 }
 async function fetchInstitutional(id){
   const s=new Date();s.setDate(s.getDate()-35);
@@ -1274,8 +1279,12 @@ async function fetchInstitutional(id){
     const rows=json.data.sort((a,b)=>a.date.localeCompare(b.date));
     const lastDate=rows[rows.length-1].date;
     const last=rows.filter(x=>x.date===lastDate);
-    const pick=kws=>{const f=last.find(x=>kws.some(k=>String(x.name||"").includes(k)));return f?normNet(f):0;};
-    const foreign=pick(["外資","外陸資"]),trust=pick(["投信"]),dealer=pick(["自營商"]);
+     // 加總同類別所有行（自營商有「自行買賣」+「避險」兩行）
+    const sum=kws=>last.filter(x=>kws.some(k=>String(x.name||x.Name||"").includes(k))).reduce((a,x)=>a+normNet(x),0);
+    const foreign=sum(["外資及陸資","外資","Foreign"]);
+    const trust=sum(["投信","Investment Trust"]);
+    const dealer=sum(["自營商","Dealer"]);
+    if(foreign===0&&trust===0&&dealer===0) return null; // 全0視為無資料
     return {date:lastDate,foreign,trust,dealer,total:foreign+trust+dealer};
   }catch{return null;}
 }
@@ -1289,9 +1298,12 @@ async function fetchMargin(id){
     if(json.msg!=="success"||!json.data?.length) return null;
     const rows=json.data.sort((a,b)=>a.date.localeCompare(b.date));
     const last=rows[rows.length-1],prev=rows.length>=2?rows[rows.length-2]:last;
-    const mb=sn(last.MarginPurchaseTodayBalance??last.margin_purchase_today_balance);
-    const mp=sn(prev.MarginPurchaseTodayBalance??prev.margin_purchase_today_balance);
-    const sb=sn(last.ShortSaleTodayBalance??last.short_sale_today_balance);
+     // 相容 PascalCase（v4）與 snake_case（舊版）
+    const gf=(r,pascal,snake)=>sn(r[pascal]??r[snake]??r[pascal.toLowerCase()]??0);
+    const mb=gf(last,"MarginPurchaseTodayBalance","margin_purchase_today_balance");
+    const mp=gf(prev,"MarginPurchaseTodayBalance","margin_purchase_today_balance");
+    const sb=gf(last,"ShortSaleTodayBalance","short_sale_today_balance");
+    if(mb===0&&sb===0) return null; // 全0視為無資料
     return {date:last.date,marginBal:mb,marginDelta:mb-mp,shortBal:sb,shortRatio:mb>0?(sb/mb)*100:0};
   }catch{return null;}
 }
@@ -1746,7 +1758,10 @@ function startRealtime(){
         checkAlerts(live.price);
         setFetchStatus("ok");
         if(isTradingHour()){injectLiveQuote();applyTimeframe(false);}
-      } else { setFetchStatus("err"); }
+      } else {
+        // 非交易時段 TWSE 無資料屬正常，僅交易時段才顯示錯誤
+        setFetchStatus(isTradingHour()?"err":"ok");
+      }
     }catch{ setFetchStatus("err"); }
   };
   const id=setInterval(tick,sec*1000);S.intervals.add(id);
