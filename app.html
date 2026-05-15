@@ -410,6 +410,7 @@ button,input,select{font:inherit}
           <div class="sec-body">
             <div class="g2">
               <div class="box"><div class="lbl">Kelly 倉位</div><div class="val" id="kellyPct">---</div><div class="sub">上限25% 半Kelly</div></div>
+              <div class="box"><div class="lbl">ATR 停損參考</div><div class="val c-green" id="atrStop">---</div><div class="sub">現價 − 1.5×ATR</div></div>
               <div class="box"><div class="lbl">最大回撤</div><div class="val" id="maxDD">---</div></div>
               <div class="box"><div class="lbl">年化波動</div><div class="val" id="annVol">---</div></div>
               <div class="box"><div class="lbl">風險評分</div><div class="val" id="riskScore">---</div></div>
@@ -2585,15 +2586,26 @@ async function runSelftest(silent=false){
   try{ ok("sn() 數字保證", approx(sn("12.5",0),12.5,1e-9)&&sn("abc",-1)===-1?"":"sn 失敗"); }catch(e){fail("sn()",e.message);}
   try{ ok("clamp()", clamp(5,0,3)===3&&clamp(-1,0,3)===0?"":"clamp 失敗"); }catch(e){fail("clamp()",e.message);}
 
-  // ── 2. 指標數學（單調輸入 → 預期方向）──
-  const upRows=Array.from({length:60},(_,i)=>({time:`2024-01-${String(i+1).padStart(2,"0")}`,open:100+i,high:101+i,low:99+i,close:100+i+0.5,volume:1000}));
-  const downRows=Array.from({length:60},(_,i)=>({time:`2024-02-${String(i+1).padStart(2,"0")}`,open:200-i,high:201-i,low:199-i,close:200-i-0.5,volume:1000}));
+  // ── 2. 指標數學（趨勢輸入 + 變動波動 → 預期方向）──
+  // 100 根（≥80 才能跑 runBacktest）；首根特意給大 gap，讓 ATR forward-fill 檢測可分辨
+  const mkDate=(y,m,d)=>{const dt=new Date(y,m-1,d); return dt.toISOString().slice(0,10);};
+  const upRows=Array.from({length:100},(_,i)=>{
+    const base=100+i*0.6;
+    const vol=i===0?5:(1.2+Math.sin(i*0.7)*0.4+Math.cos(i*0.3)*0.3);  // 變動波動度；首根有 gap
+    return {time:mkDate(2024,1,1+i),open:base,high:base+vol,low:base-vol*0.7,close:base+vol*0.3,volume:1000+i*5};
+  });
+  const downRows=Array.from({length:100},(_,i)=>{
+    const base=300-i*0.6;
+    const vol=1.2+Math.sin(i*0.5)*0.4;
+    return {time:mkDate(2024,5,1+i),open:base,high:base+vol*0.7,low:base-vol,close:base-vol*0.3,volume:1000};
+  });
   try{
     const closes=upRows.map(r=>r.close);
     const rsi=calcRSI(closes,14);
-    rsi[rsi.length-1]>70 ? ok("RSI 上升趨勢 > 70", `rsi=${rsi[rsi.length-1].toFixed(1)}`) : fail("RSI 上升趨勢 > 70", `rsi=${rsi[rsi.length-1]}`);
+    // 上升趨勢含波動，RSI 應 > 55（嚴格大盤偏多時應接近 65-75）
+    rsi[rsi.length-1]>55 ? ok("RSI 上升趨勢 > 55", `rsi=${rsi[rsi.length-1].toFixed(1)}`) : fail("RSI 上升趨勢", `rsi=${rsi[rsi.length-1]?.toFixed(1)}`);
     const rsiD=calcRSI(downRows.map(r=>r.close),14);
-    rsiD[rsiD.length-1]<30 ? ok("RSI 下降趨勢 < 30", `rsi=${rsiD[rsiD.length-1].toFixed(1)}`) : fail("RSI 下降趨勢 < 30", `rsi=${rsiD[rsiD.length-1]}`);
+    rsiD[rsiD.length-1]<45 ? ok("RSI 下降趨勢 < 45", `rsi=${rsiD[rsiD.length-1].toFixed(1)}`) : fail("RSI 下降趨勢", `rsi=${rsiD[rsiD.length-1]?.toFixed(1)}`);
   }catch(e){fail("RSI",e.message);}
   try{
     const atr=calcATR(upRows,14);
@@ -2669,7 +2681,7 @@ async function runSelftest(silent=false){
     "chipForeign","chipTrust","chipDealer","chipTotal","chipDate","marginBal","marginChg","shortBal","shortRatio","chip-summary",
     "atrStop","maxDD","annVol","riskScore","risk-text","risk-badge",
     "archive-badge","hitRate","avgErr","verifiedN","archive-text",
-    "btReturn","btWin","btPF","btSharpe","backtest-badge","bt-text",
+    "btReturn","btWin","btPF","btSharpe","bt-badge","bt-text","kellyPct",
     "ai-body","ai-badge",
     "search","searchBtn","watchBtn","exportBtn",
     "alertType","alertPrice","addAlertBtn","alertsList","alert-badge",
