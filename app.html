@@ -206,10 +206,11 @@ button,input,select{font:inherit}
 .sp-footer{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line0)}
 
 /* ── Toast ── */
-#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:7px 14px;border-radius:var(--r2);font-size:11px;z-index:100;opacity:0;transition:opacity .2s;pointer-events:none;font-family:var(--mono)}
-#toast.show{opacity:1}
-#toast.ok{background:rgba(0,204,136,.12);border:1px solid rgba(0,204,136,.3);color:var(--green)}
-#toast.err{background:rgba(255,68,68,.12);border:1px solid rgba(255,68,68,.3);color:var(--red)}
+#toast-container{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:100;pointer-events:none;align-items:center}
+.toast-msg{padding:7px 14px;border-radius:var(--r2);font-size:11px;opacity:0;transition:opacity .2s;font-family:var(--mono);background:var(--bg2);color:var(--txt0);border:1px solid var(--line1)}
+.toast-msg.show{opacity:1}
+.toast-msg.ok{background:rgba(0,204,136,.12);border-color:rgba(0,204,136,.3);color:var(--green)}
+.toast-msg.err{background:rgba(255,68,68,.12);border-color:rgba(255,68,68,.3);color:var(--red)}
 
 /* ── Loader ── */
 .loading-mask{position:absolute;inset:0;background:rgba(4,6,8,.88);display:flex;align-items:center;justify-content:center;z-index:5;font-size:10px;color:var(--txt2);font-family:var(--mono);letter-spacing:1px;text-transform:uppercase;flex-direction:column;gap:8px}
@@ -708,14 +709,42 @@ function setWatchlist(l){ localStorage.setItem(STORE.watch,JSON.stringify(l)); }
 function getAlerts(){ try{ const v=JSON.parse(localStorage.getItem(STORE.alerts)); return Array.isArray(v)?v:[]; }catch{ return []; } }
 function setAlerts(l){ localStorage.setItem(STORE.alerts,JSON.stringify(l)); }
 function getPredArchive(){ try{ return JSON.parse(localStorage.getItem(STORE.pred))||{}; }catch{ return {}; } }
-function setPredArchive(v){ localStorage.setItem(STORE.pred,JSON.stringify(v)); }
+function setPredArchive(v){
+  try {
+    localStorage.setItem(STORE.pred, JSON.stringify(v));
+  } catch (e) {
+    console.warn("LocalStorage space exhausted, clearing prediction archive...");
+    localStorage.removeItem(STORE.pred);
+    try {
+      localStorage.setItem(STORE.pred, JSON.stringify(v));
+    } catch (err) {
+      console.error("Failed to save prediction data", err);
+    }
+  }
+}
 
 /* ─── Toast / Log ─── */
-function toast(msg,type="ok"){
-  const el=$("toast");
-  el.textContent=msg; el.className="show "+type;
-  clearTimeout(toast._t);
-  toast._t=setTimeout(()=>el.className="",3200);
+function toast(msg, type="ok"){
+  let container = document.getElementById("toast-container");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "toast-container";
+    document.body.appendChild(container);
+  }
+  const el = document.createElement("div");
+  el.className = "toast-msg " + type;
+  el.textContent = msg;
+  container.appendChild(el);
+  
+  void el.offsetWidth; // Trigger reflow
+  el.classList.add("show");
+
+  setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    }, 300);
+  }, 3200);
 }
 let _logCount=0;
 function appendLog(text){
@@ -1186,34 +1215,49 @@ async function fetchHistory(id){
   })).sort((a,b)=>a.time.localeCompare(b.time));
 }
 
-/* 即時報價：雙代理容錯，v3.1 加入 prevClose 提取 */
+/* ── CORS Proxy 健康池：評分輪換 + 舊資料快取保底 ── */
+const _proxies=[
+  {b:e=>`https://api.allorigins.win/raw?url=${e}`,   score:1.0, fails:0},
+  {b:e=>`https://corsproxy.io/?${e}`,                score:1.0, fails:0},
+  {b:e=>`https://api.codetabs.com/v1/proxy?quest=${e}`,score:0.9,fails:0},
+  {b:e=>`https://thingproxy.freeboard.io/fetch/${e}`, score:0.7, fails:0},
+];
+const _liveCache={}; // id → {q, ts}
+
+function _parseTWSE(json){
+  if(!json?.msgArray?.length) return null;
+  const r=json.msgArray[0];
+  const prev=sn(r.y);let price=prev;
+  if(r.z&&r.z!=="-") price=sn(r.z,prev);
+  else if(r.a&&r.a!=="-"){const f=String(r.a).split("_")[0];if(f&&f!=="-")price=sn(f,prev);}
+  const open=r.o&&r.o!=="-"?sn(r.o,price):price;
+  const high=r.h&&r.h!=="-"?sn(r.h,price):price;
+  const low=r.l&&r.l!=="-"?sn(r.l,price):price;
+  return {name:r.n||"",price,prev,change:price-prev,percent:prev?(price-prev)/prev*100:0,open,high,low,volume:sn(r.v),time:r.t||"",source:"TWSE"};
+}
+
 async function fetchTWSELive(id){
   const rawUrl=`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${id}.tw|otc_${id}.tw&json=1&delay=0&_=${Date.now()}`;
-  const proxies=[
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`,
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(rawUrl)}`
-  ];
-  for(const p of proxies){
+  const enc=encodeURIComponent(rawUrl);
+  // 依健康分數排序（分數相同時加入隨機抖動，避免所有用戶總打同一台）
+  const pool=[..._proxies].sort((a,b)=>b.score-a.score+(Math.random()-.5)*.15);
+  for(const px of pool){
     try{
-      const res=await fetchTimeout(p,{},6000);
-      if(!res.ok) continue;
+      const res=await fetchTimeout(px.b(enc),{},6500);
+      if(!res.ok){px.fails++;px.score=Math.max(0,px.score-.25);continue;}
       const json=await res.json();
-      if(!json?.msgArray?.length) continue;
-      const r=json.msgArray[0];
-      const prev=sn(r.y);
-      let price=prev;
-      if(r.z&&r.z!=="-") price=sn(r.z,prev);
-      else if(r.a&&r.a!=="-"){const f=String(r.a).split("_")[0];if(f&&f!=="-")price=sn(f,prev);}
-      const open=r.o&&r.o!=="-"?sn(r.o,price):price;
-      const high=r.h&&r.h!=="-"?sn(r.h,price):price;
-      const low=r.l&&r.l!=="-"?sn(r.l,price):price;
-      return {
-        name:r.n||"",price,prev,change:price-prev,
-        percent:prev?(price-prev)/prev*100:0,
-        open,high,low,
-        volume:sn(r.v),time:r.t||"",source:"TWSE"
-      };
-    }catch{}
+      const q=_parseTWSE(json);
+      if(!q){px.score=Math.max(0,px.score-.1);continue;}
+      // 成功：回復分數、清失敗計數
+      px.fails=0;px.score=Math.min(2,px.score+.15);
+      _liveCache[id]={q,ts:Date.now()};
+      return q;
+    }catch{px.fails++;px.score=Math.max(0,px.score-.3);}
+  }
+  // 全部代理失敗：回傳舊快取（90 秒內視為有效，標記為 stale）
+  const cached=_liveCache[id];
+  if(cached&&Date.now()-cached.ts<90000){
+    return {...cached.q,stale:true};
   }
   return null;
 }
