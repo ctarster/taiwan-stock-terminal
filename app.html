@@ -670,11 +670,49 @@ const FACTOR_LABELS={
 };
 
 /* ─── 工具 ─── */
-const $ = id => document.getElementById(id);
-/* null-safe setters — 機構級防禦：element 不存在時靜默跳過，不拋 TypeError */
-const $t = (id,v) => { const e=document.getElementById(id); if(e) e.textContent=v; return e; };
-const $st = (id,prop,v) => { const e=document.getElementById(id); if(e) e.style[prop]=v; };
-const $cls = (id,c) => { const e=document.getElementById(id); if(e) e.className=c; };
+/* ─── 機構級 DOM 防禦層 ─────────────────────────────────────────────
+ * $(id) 永不回傳 null：找不到元素時回傳「無害 sink」Proxy。
+ *   • 屬性讀取 → 安全空值或鏈式 sink（避免 NPE）
+ *   • 屬性賦值 → 靜默丟棄（杜絕 "Cannot set properties of null"）
+ *   • 方法呼叫 → no-op，回傳 sink（addEventListener / appendChild 等不爆）
+ *   • 首次缺失的 id → console.warn 一次，便於診斷（不中斷主流程）
+ *   • 需要「真實 DOM 節點」時用 $.real(id) / $.isReal(el)
+ * 為何這樣做：交易終端在盤中不容許因單一面板缺失整支前端崩潰 —
+ *   局部降級（Graceful Degradation）優於全盤失效，這是 trading-grade 前端必要原則。
+ * ─────────────────────────────────────────────────────────────── */
+const _missingIds = new Set();
+const _SINK = new Proxy(function(){}, {
+  get(_, p){
+    if (p === Symbol.toPrimitive)              return () => "";
+    if (p === "toString" || p === "valueOf")   return () => "";
+    if (p === "textContent" || p === "innerHTML" || p === "value" ||
+        p === "className"   || p === "id"        || p === "tagName") return "";
+    if (p === "checked" || p === "disabled" || p === "hidden")       return false;
+    if (p === "nodeType")                                            return 0;
+    if (p === "clientWidth" || p === "clientHeight" ||
+        p === "offsetWidth" || p === "offsetHeight" ||
+        p === "scrollTop"   || p === "scrollLeft")                   return 0;
+    return _SINK; // style / dataset / classList / 任何方法 → 鏈式 no-op
+  },
+  set(){ return true; },          // 任何賦值靜默丟棄
+  apply(){ return _SINK; },       // 任何方法呼叫 no-op
+  has(){ return true; }
+});
+const $ = id => {
+  const e = document.getElementById(id);
+  if (e) return e;
+  if (!_missingIds.has(id)) {
+    _missingIds.add(id);
+    try { console.warn(`[QDP][DOM] missing #${id} — operations no-op'd`); } catch{}
+  }
+  return _SINK;
+};
+$.real   = id => document.getElementById(id);                          // 需真實節點時用（createChart 等）
+$.isReal = el => !!el && el !== _SINK && el.nodeType === 1;            // 嚴格節點檢測
+/* 既有 null-safe 包裝保留 — 對既有呼叫端零影響 */
+const $t  = (id,v)      => { const e=$.real(id); if(e) e.textContent=v;   return e; };
+const $st = (id,prop,v) => { const e=$.real(id); if(e) e.style[prop]=v;   return e; };
+const $cls= (id,c)      => { const e=$.real(id); if(e) e.className=c;     return e; };
 const sn = (v,fb=0) => { const n=Number(v); return Number.isFinite(n)?n:fb; };
 const fp = v => Number.isFinite(+v) ? (+v).toFixed(2) : "---";
 const fc = v => Number.isFinite(+v) ? ((+v>=0?"+":"")+((+v).toFixed(2))) : "---";
@@ -761,11 +799,11 @@ function toast(msg, type="ok"){
 }
 let _logCount=0;
 function appendLog(text){
-  const el=$("log-body");
+  const el=$.real("log-body");
   const ts=taiwanNow().toLocaleTimeString("zh-TW");
-  el.textContent=`[${ts}] ${text}\n${el.textContent}`.slice(0,6000);
+  if(el) el.textContent=`[${ts}] ${text}\n${el.textContent}`.slice(0,6000);
   _logCount++;
-  const badge=$("log-count");
+  const badge=$.real("log-count");
   if(badge) badge.textContent=_logCount;
 }
 
@@ -1723,7 +1761,7 @@ function buildCharts(){
     crosshair:{mode:1}
   };
   const makeChart=(id)=>{
-    const el=$(id);if(!el) return null;
+    const el=$.real(id); if(!el) return null;   // createChart 需要真實 DOM 節點，不可吃 sink
     return LightweightCharts.createChart(el,{...common,width:el.clientWidth,height:el.clientHeight||100});
   };
   S.charts.c1=makeChart("c1");S.charts.c2=makeChart("c2");
@@ -2008,7 +2046,7 @@ async function renderWatchlist(){
    // 重建 DOM 前先保存既有價格快取（防止 watchInflight 時清空）
   if(!S.wlCache) S.wlCache={};
   list.forEach(item=>{
-    const pel=$("wlp_"+item.id),cel=$("wlc_"+item.id);
+    const pel=$.real("wlp_"+item.id),cel=$.real("wlc_"+item.id);
     if(pel&&pel.textContent!=="---") S.wlCache[item.id]={p:pel.textContent,pc:pel.style.color,c:cel?.textContent,cc:cel?.style.color};
     // 已載入的股票直接以最新報價覆蓋快取
     if(item.id===S.stockId&&S.liveQuote){
