@@ -654,10 +654,16 @@ const KNOWN = {
   "2379":"瑞昱","5483":"中美晶","3714":"兆利","2345":"智邦","6669":"緯穎"
 };
 const STORE = { cfg:"qdp31_cfg", watch:"qdp31_watch", alerts:"qdp31_alerts", pred:"qdp31_pred" };
-const BASE_W = { rsi:.14, macd:.18, kdj:.12, bb:.10, vol:.10, ma:.18, chip:.11, margin:.07 };
-const FACTOR_LABELS = {
-  rsi:"RSI 動能", macd:"MACD 趨勢", kdj:"KDJ 震盪",
-  bb:"布林位置", vol:"量價背離", ma:"均線結構", chip:"三大法人", margin:"融資融券"
+const BASE_W={
+  rsi:.08, macd:.10, kdj:.06, bb:.06, vol:.07, ma:.09, chip:.08, margin:.05,
+  adx:.07, obv:.07, stochRsi:.06, mfi:.06, mom20:.05, vwapDev:.05,
+  revenue:.05, eps:.05
+};
+const FACTOR_LABELS={
+  rsi:"RSI動能",     macd:"MACD趨勢",    kdj:"KDJ震盪",    bb:"布林位置",
+  vol:"量價能量",    ma:"均線結構",      chip:"三大法人",  margin:"融資融券",
+  adx:"ADX趨勢力",  obv:"OBV能量",      stochRsi:"隨機RSI", mfi:"資金流向",
+  mom20:"20日動能",  vwapDev:"VWAP偏離", revenue:"月營收",  eps:"EPS趨勢"
 };
 
 /* ─── 工具 ─── */
@@ -688,7 +694,7 @@ const S = {
   todayPriceHistory:[], // 今日盤中走勢 [{t,p}]
   chips:null, margin:null,
   w52high:null, w52low:null,
-  pred:null, backtest:null, archiveStats:null,
+  pred:null, backtest:null, archiveStats:null, fundamentals:null,
   charts:{}, series:{}, resizeObs:null, pivotLines:[],
   intervals:new Set(), loadToken:0,
   watchInflight:false, prevTimeframe:null,
