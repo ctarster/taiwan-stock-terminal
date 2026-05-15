@@ -1810,33 +1810,51 @@ function addAlert(){
   try{if("Notification" in window&&Notification.permission==="default")Notification.requestPermission();}catch{}
 }
 
-/* ── 自選清單 v3.1：加入漲跌幅 delta ── */
+/* ── 自選清單 ── */
 async function renderWatchlist(){
   const list=getWatchlist(),wrap=$("watchList");
   $("wl-count").textContent=list.length;
+   // 重建 DOM 前先保存既有價格快取（防止 watchInflight 時清空）
+  if(!S.wlCache) S.wlCache={};
+  list.forEach(item=>{
+    const pel=$("wlp_"+item.id),cel=$("wlc_"+item.id);
+    if(pel&&pel.textContent!=="---") S.wlCache[item.id]={p:pel.textContent,pc:pel.style.color,c:cel?.textContent,cc:cel?.style.color};
+    // 已載入的股票直接以最新報價覆蓋快取
+    if(item.id===S.stockId&&S.liveQuote){
+      const q=S.liveQuote,col=q.change>=0?"var(--red)":"var(--green)";
+      S.wlCache[item.id]={p:fp(q.price),pc:col,c:fpc(q.percent),cc:col};
+    }
+  });
   wrap.innerHTML="";
   list.forEach(item=>{
-    const div=document.createElement("div");div.className="list-item"+(item.id===S.stockId?" active":"");
+    const div=document.createElement("div");
+    div.className="list-item"+(item.id===S.stockId?" active":"");
     div.innerHTML=`<div><div class="sym">${item.id}</div><div class="name">${item.name||KNOWN[item.id]||""}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:1px"><span class="pr" id="wlp_${item.id}">---</span><span class="pr-chg" id="wlc_${item.id}" style="color:var(--txt3)">---</span></div><button class="del">✕</button>`;
     div.addEventListener("click",e=>{if(e.target.tagName==="BUTTON") return;loadStock(item.id);});
     div.querySelector(".del").addEventListener("click",e=>{
       e.stopPropagation();setWatchlist(getWatchlist().filter(x=>x.id!==item.id));renderWatchlist();
     });
     wrap.appendChild(div);
+     // 立即從快取還原價格，避免閃爍為 ---
+    const cached=S.wlCache[item.id];
+    if(cached){
+      const pel=$("wlp_"+item.id),cel=$("wlc_"+item.id);
+      if(pel){pel.textContent=cached.p;pel.style.color=cached.pc;}
+      if(cel&&cached.c){cel.textContent=cached.c;cel.style.color=cached.cc||"var(--txt3)";}
+    }
   });
-  if(S.watchInflight) return;S.watchInflight=true;
+  if(S.watchInflight) return; // DOM 已更新且快取已還原，可安全提前返回
+  S.watchInflight=true;
   try{
     for(const item of list){
       try{
         const q=await fetchTWSELive(item.id);
-        const pel=$("wlp_"+item.id),cel=$("wlc_"+item.id);
-        if(pel&&q){
-          pel.textContent=fp(q.price);
-          pel.style.color=q.change>=0?"var(--red)":"var(--green)";
-        }
-        if(cel&&q){
-          cel.textContent=fpc(q.percent);
-          cel.style.color=q.change>=0?"var(--red)":"var(--green)";
+        if(q){
+          const col=q.change>=0?"var(--red)":"var(--green)";
+          S.wlCache[item.id]={p:fp(q.price),pc:col,c:fpc(q.percent),cc:col};
+          const pel=$("wlp_"+item.id),cel=$("wlc_"+item.id);
+          if(pel){pel.textContent=fp(q.price);pel.style.color=col;}
+          if(cel){cel.textContent=fpc(q.percent);cel.style.color=col;}
         }
       }catch{}
       await sleep(250);
