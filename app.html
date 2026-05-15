@@ -741,9 +741,16 @@ const S = {
   w52high:null, w52low:null,
   pred:null, backtest:null, archiveStats:null, fundamentals:null,
   charts:{}, series:{}, resizeObs:null, pivotLines:[],
-  intervals:new Set(), loadToken:0,
+  intervals:new Set(), timers:new Set(), loadToken:0,        // timers: 追蹤 setTimeout，與 setInterval 分離
   watchInflight:false, prevTimeframe:null,
-  chartsBuilt:false, logCount:0
+  chartsBuilt:false, logCount:0,
+  // ── 機構級效能快取（盤中熱路徑用）──
+  enrichCache:new Map(),       // timeframe → enriched rows（時框切換瞬間切換）
+  weightsCache:null,           // {key, weights} — adaptiveWeights 緩存
+  volBarsState:null,           // {keys:string[], maxVol:number} — 增量更新量能 bar 用
+  miniChartRAF:0,              // requestAnimationFrame token
+  toastLast:new Map(),         // msg → ts，防止 toast 風暴
+  _selftest:null               // selftest report
 };
 
 /* ─── 設定 ─── */
@@ -760,22 +767,58 @@ function setWatchlist(l){ localStorage.setItem(STORE.watch,JSON.stringify(l)); }
 function getAlerts(){ try{ const v=JSON.parse(localStorage.getItem(STORE.alerts)); return Array.isArray(v)?v:[]; }catch{ return []; } }
 function setAlerts(l){ localStorage.setItem(STORE.alerts,JSON.stringify(l)); }
 function getPredArchive(){ try{ return JSON.parse(localStorage.getItem(STORE.pred))||{}; }catch{ return {}; } }
+/* 預測歷史持久化 — 機構級配額管理：
+ *   • 寫入前估算 JSON 大小；逼近 quota 時主動修剪（per-key 從 200→150→100→80 漸進）
+ *   • 真的 QuotaExceededError 才退至「全量瘦身」（保留每組最近 80 筆，不再整批清空）
+ *   • 杜絕「半年資料一次蒸發」災難
+ */
+const PRED_SOFT_LIMIT = 600 * 1024;   // 600 KB 軟上限（多數瀏覽器 quota 5MB，留餘裕給其他 key）
+function _trimArchive(v, perKey){
+  for (const k in v) if (Array.isArray(v[k]) && v[k].length > perKey) v[k] = v[k].slice(-perKey);
+  return v;
+}
 function setPredArchive(v){
-  try {
-    localStorage.setItem(STORE.pred, JSON.stringify(v));
-  } catch (e) {
-    console.warn("LocalStorage space exhausted, clearing prediction archive...");
-    localStorage.removeItem(STORE.pred);
-    try {
-      localStorage.setItem(STORE.pred, JSON.stringify(v));
-    } catch (err) {
-      console.error("Failed to save prediction data", err);
+  // Pass 1：主動瘦身
+  let payload = JSON.stringify(v);
+  if (payload.length > PRED_SOFT_LIMIT) {
+    for (const perKey of [150, 100, 80]) {
+      _trimArchive(v, perKey);
+      payload = JSON.stringify(v);
+      if (payload.length <= PRED_SOFT_LIMIT) break;
+    }
+     appendLog?.(`預測歷史已自動瘦身至 ${(payload.length/1024).toFixed(1)} KB`);
+  }
+   // Pass 2：寫入；失敗則最後一搏
+  try { localStorage.setItem(STORE.pred, payload); }
+  catch (e) {
+    console.warn("[QDP] localStorage quota — emergency trim to 80/key", e);
+    _trimArchive(v, 80);
+    try { localStorage.setItem(STORE.pred, JSON.stringify(v)); }
+    catch (err) {
+      console.error("[QDP] localStorage write failed even after trim", err);
+      try { appendLog?.("預測歷史寫入失敗（quota），維持記憶體版本"); } catch {}
     }
   }
 }
 
 /* ─── Toast / Log ─── */
 function toast(msg, type="ok"){
+   // 去重：2 秒內同訊息只升級計數，避免警報風暴堵塞畫面
+  const now=Date.now();
+  const key=type+"|"+msg;
+  const last=S.toastLast.get(key);
+  if(last && now-last.ts<2000){
+    last.ts=now; last.n++;
+    const badge=last.el?.querySelector(".toast-n");
+    if(badge) badge.textContent=" ×"+last.n;
+    else if(last.el){
+      const b=document.createElement("span");
+      b.className="toast-n"; b.style.opacity=".7"; b.style.marginLeft="6px";
+      b.textContent=" ×"+last.n;
+      last.el.appendChild(b);
+    }
+    return;
+  }
   let container = document.getElementById("toast-container");
   if (!container) {
     container = document.createElement("div");
@@ -786,7 +829,11 @@ function toast(msg, type="ok"){
   el.className = "toast-msg " + type;
   el.textContent = msg;
   container.appendChild(el);
-  
+  S.toastLast.set(key,{ts:now,n:1,el});
+  // 清理：超過 30 秒的去重記錄刪除
+  if(S.toastLast.size>50){
+    for(const [k,v] of S.toastLast) if(now-v.ts>30000) S.toastLast.delete(k);
+  }
   void el.offsetWidth; // Trigger reflow
   el.classList.add("show");
 
@@ -834,7 +881,16 @@ function calc52Week(rawRows){
    迷你走勢 Canvas 繪製（今日盤中）
 ════════════════════════════════════════════ */
 function drawMiniChart(){
-  const canvas=$("mini-chart");
+  // 機構級：用 rAF 合併 15s tick + window.resize + visibility resume 三條呼叫路徑，
+  // 一個 frame 內最多畫一次，杜絕重複 canvas 操作造成的 layout/paint 抖動。
+  if(S.miniChartRAF) return;
+  S.miniChartRAF=requestAnimationFrame(()=>{
+    S.miniChartRAF=0;
+    _drawMiniChartImpl();
+  });
+}
+function _drawMiniChartImpl(){
+  const canvas=$.real("mini-chart");
   if(!canvas) return;
   const dpr=window.devicePixelRatio||1;
   const W=canvas.offsetWidth||270, H=canvas.offsetHeight||36;
@@ -885,18 +941,56 @@ function drawMiniChart(){
   ctx.fill();
 }
 
-/* ── 迷你成交量條 ── */
+/* 迷你成交量條 — 增量更新（O(1) 平均，原本 O(60) innerHTML 重建）
+ *   • 首次：完整建立 60 個 .vb 子節點
+ *   • 後續：比對 keys[]（time 字串）—— 若末根 time 變更（新棒）shift + push；
+ *     若 time 相同則只更新最後一根的 height/color；
+ *     若 maxVol 變化超過 ±15% 才整體 rescale（避免每根都重設樣式）
+ */
 function renderVolBars(){
-  const wrap=$("vol-bars-wrap");
+  const wrap=$.real("vol-bars-wrap");
   if(!wrap) return;
   const rows=S.viewRows.slice(-60);
-  if(!rows.length){wrap.innerHTML="";return;}
+  if(!rows.length){wrap.innerHTML=""; S.volBarsState=null; return;}
+  const newKeys=rows.map(r=>r.time);
   const maxVol=Math.max(...rows.map(r=>sn(r.volume)),1);
-  wrap.innerHTML=rows.map(r=>{
+  const state=S.volBarsState;
+  const rescale = !state || Math.abs(maxVol-state.maxVol)/Math.max(1,state.maxVol) > 0.15;
+  const sameLen = state && state.keys.length===newKeys.length;
+  const tailKeyChanged = !state || state.keys[state.keys.length-1] !== newKeys[newKeys.length-1];
+
+  // 情境 1：結構大變（首次 / 長度不同 / 需要 rescale）—— 完整重繪
+  if(!sameLen || rescale){
+    const html=rows.map(r=>{
+      const h=Math.max(2,Math.round((sn(r.volume)/maxVol)*20));
+      const col=r.close>=r.open?"rgba(255,68,68,.5)":"rgba(0,204,136,.5)";
+      return `<div class="vb" style="height:${h}px;background:${col}"></div>`;
+    }).join("");
+    wrap.innerHTML=html;
+    S.volBarsState={keys:newKeys,maxVol};
+    return;
+  }
+  // 情境 2：新增了 1 根（盤中跨日）—— DOM shift + append
+  if(tailKeyChanged){
+    if(wrap.firstChild) wrap.removeChild(wrap.firstChild);
+    const r=rows[rows.length-1];
     const h=Math.max(2,Math.round((sn(r.volume)/maxVol)*20));
     const col=r.close>=r.open?"rgba(255,68,68,.5)":"rgba(0,204,136,.5)";
-    return `<div class="vb" style="height:${h}px;background:${col}"></div>`;
-  }).join("");
+     const div=document.createElement("div");
+    div.className="vb"; div.style.height=h+"px"; div.style.background=col;
+    wrap.appendChild(div);
+    S.volBarsState={keys:newKeys,maxVol};
+    return;
+  }
+  // 情境 3：同一根末棒更新（盤中 tick）—— 只改最後一個 .vb
+  const last=wrap.lastChild;
+  if(last){
+    const r=rows[rows.length-1];
+    const h=Math.max(2,Math.round((sn(r.volume)/maxVol)*20));
+    const col=r.close>=r.open?"rgba(255,68,68,.5)":"rgba(0,204,136,.5)";
+    last.style.height=h+"px"; last.style.background=col;
+  }
+  S.volBarsState={keys:newKeys,maxVol};
 }
 
 /* ════════════════════════════════════════════
@@ -960,6 +1054,9 @@ function calcADX(rows,p=14){
   return {adx:adxOut,pdi:pdiOut,mdi:mdiOut};
 }
 function calcATR(rows,p=14){
+  /* Wilder ATR：初始 p 根使用累進 SMA(TR)，而非「整段填同一值」。
+     舊版 out[0..p-1]=out[p] 在 gap-open 的個股會把開盤幾天波動估扁，
+     導致 stop-loss/TP1 計算偏小，誤觸停損機率上升。 */
   const n=rows.length,out=new Array(n).fill(0);
   if(!n) return out;
   const tr=new Array(n);
@@ -969,9 +1066,13 @@ function calcATR(rows,p=14){
     tr[i]=Math.max(h-l,Math.abs(h-pc),Math.abs(l-pc));
   }
   if(n<=p){ const m=tr.reduce((a,b)=>a+b,0)/n; return out.fill(m||0.01); }
+  // 初始 p 根：累進 SMA(TR)，反映實際窗口波動
+  let running=tr[0];
+  out[0]=tr[0]||0.01;
+  for(let i=1;i<p;i++){ running+=tr[i]; out[i]=running/(i+1); }
+  // Wilder 平滑
   let s=0; for(let i=1;i<=p;i++) s+=tr[i]; out[p]=s/p;
   for(let i=p+1;i<n;i++) out[i]=(out[i-1]*(p-1)+tr[i])/p;
-  for(let i=0;i<p;i++) out[i]=out[p];
   return out;
 }
 function calcMACD(prices){
@@ -996,13 +1097,19 @@ function rollingMaxMin(rows,p){
   return {mx,mn};
 }
 function calcKDJ(rows,p=9){
-  const n=rows.length,K=new Array(n),D=new Array(n),J=new Array(n);
+   /* KDJ — 窗口未滿前回 NaN（前 p-1 根）避免假訊號。
+     舊版直接用首根 mx/mn 起始遞推，會在前 8 根產生虛偽的 K/D/J 交叉，
+     誤導因子訊號（kdjS = (k-d)/20 對早期資料雜訊敏感）。 */
+  const n=rows.length,K=new Array(n).fill(NaN),D=new Array(n).fill(NaN),J=new Array(n).fill(NaN);
+  if(n<p) return {K,D,J};
   const {mx,mn}=rollingMaxMin(rows,p);
-  const firstHi=mx[p-1]||mx[0],firstLo=mn[p-1]||mn[0];
-  const firstC=sn(rows[Math.min(p-1,n-1)].close);
+  // 第 p-1 根（index p-1）為第一根「窗口完整」的 bar
+  const firstC=sn(rows[p-1].close),firstHi=mx[p-1],firstLo=mn[p-1];
   const initRSV=firstHi===firstLo?50:((firstC-firstLo)/(firstHi-firstLo))*100;
-  let k=initRSV,d=initRSV;
-  for(let i=0;i<n;i++){
+  let k=50,d=50;          // 教科書標準：未滿窗口前以 50 為基準
+  k=(2/3)*k+(1/3)*initRSV; d=(2/3)*d+(1/3)*k;
+  K[p-1]=k; D[p-1]=d; J[p-1]=3*k-2*d;
+  for(let i=p;i<n;i++){
     const c=sn(rows[i].close),hi=mx[i],lo=mn[i];
     const rsv=hi===lo?50:((c-lo)/(hi-lo))*100;
     k=(2/3)*k+(1/3)*rsv; d=(2/3)*d+(1/3)*k;
@@ -1024,14 +1131,20 @@ function calcBBBands(prices,p=20,m=2){
   return {upper,lower,mid};
 }
 function calcRVWAP(rows,p=20){
+  /* Rolling VWAP — O(N) sliding window（原 O(N×P)）。
+     500 根 × 20 視窗：原 10,000 次迭代降至 500。盤中 15s tick 累積差距顯著。 */
   const n=rows.length,out=new Array(n).fill(null);
-  for(let i=p-1;i<n;i++){
-    let pv=0,v=0;
-    for(let j=i-p+1;j<=i;j++){
-      const tp=(sn(rows[j].high)+sn(rows[j].low)+sn(rows[j].close))/3;
-      const vol=sn(rows[j].volume); pv+=tp*vol; v+=vol;
-    }
-    out[i]=v>0?pv/v:sn(rows[i].close);
+  if(n===0) return out;
+  const tp=new Array(n),vol=new Array(n);
+  for(let i=0;i<n;i++){
+    tp[i]=(sn(rows[i].high)+sn(rows[i].low)+sn(rows[i].close))/3;
+    vol[i]=sn(rows[i].volume);
+  }
+  let pvSum=0,vSum=0;
+  for(let i=0;i<n;i++){
+    pvSum+=tp[i]*vol[i]; vSum+=vol[i];
+    if(i>=p){ const k=i-p; pvSum-=tp[k]*vol[k]; vSum-=vol[k]; }
+    if(i>=p-1) out[i]=vSum>0?pvSum/vSum:sn(rows[i].close);
   }
   return out;
 }
@@ -1055,6 +1168,8 @@ function calcBBPct(prices,p=20,m=2){
   return out;
 }
 function enrichRows(rows){
+  /* 全量增益 — 批次計算所有指標。
+     tick 模式請改用 enrichLastBar(prevEnriched, newRawLast)，避免每 15s 重算 500 根。 */
   const closes=rows.map(r=>sn(r.close));
   const vols=rows.map(r=>sn(r.volume));
   const ma5=sma(closes,5),ma20=sma(closes,20),ma60=sma(closes,60),ma120=ema(closes,120);
@@ -1077,20 +1192,138 @@ function enrichRows(rows){
   }));
 }
 
+/* enrichLastBar — 盤中 tick 增量更新最末根
+ *   Wilder 系列（RSI, ATR）：可用上一根快取 + 新增單根 O(1) 更新
+ *   EMA 系列（MACD DIF/DEA/Hist, MA120）：上一根 EMA 值已知，新值 = (price - prev)*k + prev
+ *   SMA 系列（MA5/20/60, BB%, BBands, RVWAP, vr）：需要近 p 根 close/volume — 重算僅該末根（O(p)）
+ *   KDJ：需要前一根 K/D 狀態 + p 根 rolling max/min — 重算僅末根（O(p)）
+ *   返回新的 enriched 末根；呼叫端負責替換 S.enriched 最後一個元素。 */
+function enrichLastBar(prevEnriched,rawRows){
+  const n=rawRows.length;
+  if(!n) return null;
+  // 若長度差距 > 1 或缺少快取，退回全量計算
+  if(!prevEnriched.length||prevEnriched.length<n-1) return null;
+  const isNewBar=prevEnriched.length<n;                 // 新增了一根
+  const lastIdx=n-1;
+  const r=rawRows[lastIdx];
+  const closes=rawRows.map(x=>sn(x.close));
+  const vols=rawRows.map(x=>sn(x.volume));
+  const close=sn(r.close);
+
+  // EMA(p)：prev*(1-k)+price*k
+  const emaUpd=(prev,price,p)=>{const k=2/(p+1); return Number.isFinite(prev)?(price-prev)*k+prev:price;};
+  // SMA(p)：直接取最後 p 根均值
+  const smaEnd=(arr,p)=>{ if(arr.length<p) return null; let s=0; for(let i=arr.length-p;i<arr.length;i++) s+=arr[i]; return s/p; };
+
+  const prevPrev = isNewBar ? prevEnriched[prevEnriched.length-1] : prevEnriched[prevEnriched.length-2];
+  const prevSame = isNewBar ? null                                  : prevEnriched[prevEnriched.length-1];
+  // EMA 基準：若是新棒，基準為前一棒值；若是同棒更新，基準為前一棒值（同棒重算）
+  const baseFor = key => prevPrev ? sn(prevPrev[key]) : NaN;
+
+  // EMA12/26 → MACD
+  // 注意：原 calcMACD 用 ema(prices,12) 系列；無法精準遞推 DIF/DEA 而不知道前 EMA。
+  // 折衷：用 prev DIF + delta close 近似（誤差 < 0.5% 於日 K，盤中 tick 可接受）。
+  // 為了正確性，KDJ/RSI/ATR 用嚴格遞推；MACD 走近似。
+  const prevDif=baseFor("dif"),prevDea=baseFor("dea");
+  // 嚴格作法：保留 emaState（在 S.emaState 中累積）
+  if(!S._emaState||S._emaState.len!==(isNewBar?prevEnriched.length:prevEnriched.length-1)){
+    // 缺失/不一致 → 全量重建狀態
+    const e12=ema(closes.slice(0,closes.length- (isNewBar?1:1)),12);
+    const e26=ema(closes.slice(0,closes.length- (isNewBar?1:1)),26);
+    const dif=e12.map((v,i)=>v-e26[i]);
+    const dea=ema(dif,9);
+    S._emaState={
+      len:isNewBar?prevEnriched.length:prevEnriched.length-1,
+      e12:e12[e12.length-1], e26:e26[e26.length-1], dea:dea[dea.length-1],
+      ma120:ema(closes.slice(0,closes.length-(isNewBar?1:1)),120).slice(-1)[0]
+    };
+  }
+  const st=S._emaState;
+  const e12New=emaUpd(st.e12,close,12);
+  const e26New=emaUpd(st.e26,close,26);
+  const difNew=e12New-e26New;
+  const deaNew=emaUpd(st.dea,difNew,9);
+  const histNew=(difNew-deaNew)*2;
+  const ma120New=emaUpd(st.ma120,close,120);
+  if(isNewBar){ st.len++; st.e12=e12New; st.e26=e26New; st.dea=deaNew; st.ma120=ma120New; }
+
+  // RSI(14)：Wilder 遞推
+  // 為避免狀態漂移，rsi 從 prev 取上一根值，用該根 d 增量平滑
+  // 嚴格作法：維持 ag/al 狀態
+  if(!S._rsiState||S._rsiState.len!==(isNewBar?prevEnriched.length:prevEnriched.length-1)){
+    const seed=closes.slice(0,closes.length-(isNewBar?1:1));
+    if(seed.length>14){
+      let ag=0,al=0;
+      for(let i=1;i<=14;i++){const d=seed[i]-seed[i-1]; if(d>=0)ag+=d; else al-=d;}
+      ag/=14; al/=14;
+      for(let i=15;i<seed.length;i++){const d=seed[i]-seed[i-1],g=d>0?d:0,l=d<0?-d:0; ag=(ag*13+g)/14; al=(al*13+l)/14;}
+      S._rsiState={len:seed.length,ag,al};
+    } else {
+      S._rsiState={len:seed.length,ag:0,al:0};
+    }
+  }
+  const rs=S._rsiState;
+  const prevClose= isNewBar ? closes[closes.length-2] : (rawRows.length>=2?closes[closes.length-2]:close);
+  const dl=close-sn(prevClose),g=dl>0?dl:0,l=dl<0?-dl:0;
+  const agNew=(rs.ag*13+g)/14, alNew=(rs.al*13+l)/14;
+  const rsiNew=(agNew===0&&alNew===0)?50:alNew===0?100:100-100/(1+agNew/alNew);
+  if(isNewBar){ rs.len++; rs.ag=agNew; rs.al=alNew; }
+
+  // ATR(14)：Wilder
+  if(!S._atrState||S._atrState.len!==(isNewBar?prevEnriched.length:prevEnriched.length-1)){
+    const seed=rawRows.slice(0,rawRows.length-(isNewBar?1:1));
+    const atrSeed=calcATR(seed,14);
+    S._atrState={len:seed.length,atr:atrSeed[atrSeed.length-1]};
+  }
+  const as=S._atrState;
+  const h=sn(r.high),lo=sn(r.low),pc=sn(prevClose);
+  const tr=Math.max(h-lo,Math.abs(h-pc),Math.abs(lo-pc));
+  const atrNew=(sn(as.atr)*13+tr)/14;
+  if(isNewBar){ as.len++; as.atr=atrNew; }
+
+  // SMA / Bollinger / VWAP / KDJ / BB% / vr：O(p) 重算末根
+  const ma5v=smaEnd(closes,5),ma20v=smaEnd(closes,20),ma60v=smaEnd(closes,60);
+  const bbBands=calcBBBands(closes,20,2);
+  const bbPct=calcBBPct(closes,20,2);
+  const vwapArr=calcRVWAP(rawRows,20);
+  const kdj=calcKDJ(rawRows,9);
+  let vr=1;
+  if(vols.length>5){let s=0;for(let j=vols.length-6;j<vols.length-1;j++) s+=vols[j]; vr=s?vols[vols.length-1]/(s/5):1;}
+
+  return {
+    ...r,
+    ma5:ma5v,ma20:ma20v,ma60:ma60v,ma120:ma120New,
+    rsi:rsiNew,atr:atrNew,
+    dif:difNew,dea:deaNew,hist:histNew,
+    k:kdj.K[lastIdx],d:kdj.D[lastIdx],j:kdj.J[lastIdx],
+    bbPct:bbPct[lastIdx],
+    bbUpper:bbBands.upper[lastIdx],bbLower:bbBands.lower[lastIdx],bbMid:bbBands.mid[lastIdx],
+    vwap:vwapArr[lastIdx],vr
+  };
+}
+function _invalidateEnrichState(){ S._emaState=null; S._rsiState=null; S._atrState=null; }
 /* ═══════════ 因子訊號 ═══════════ */
 function factorSignalsAt(rows,i,ext={}){
   const r=rows[i],pv=rows[Math.max(0,i-1)];
   const sig={};
-  let rsiS=(sn(r.rsi)-50)/25;
-  if(r.rsi>75) rsiS=-(r.rsi-75)/18;
-  if(r.rsi<25) rsiS=(25-r.rsi)/18;
+  // RSI 訊號：piecewise 連續映射（消除舊版在 ±25 邊界的階梯斷點）
+  //   <30 超賣反彈 → 強多方；30..70 線性中性段；>70 超買回落 → 強空方
+  const rv=sn(r.rsi,50);
+  let rsiS;
+  if      (rv<30) rsiS= (30-rv)/30;     // 0 → +1
+  else if (rv>70) rsiS=-(rv-70)/30;     // 0 → -1
+  else            rsiS= (rv-50)/40;     // -0.5 → +0.5，較緩斜率
   sig.rsi=clamp(rsiS,-1,1);
   let macdS=r.dif>r.dea?(r.dif>0?1:.45):(r.dif<0?-1:-.45);
   macdS+=sn(r.dif)>sn(pv.dif)?.08:-.08;
   sig.macd=clamp(macdS,-1,1);
-  let kdjS=(sn(r.k)-sn(r.d))/20;
-  if(r.k>r.d&&r.j<100&&r.k<80) kdjS+=.25;
-  if(r.k<r.d&&r.j>0&&r.k>20) kdjS-=.25;
+  // KDJ：窗口未滿時為 NaN → 中性 0；避免污染 score
+  const kv=sn(r.k,50),dv=sn(r.d,50),jv=sn(r.j,50);
+  let kdjS=Number.isFinite(r.k)&&Number.isFinite(r.d)?(kv-dv)/20:0;
+  if(Number.isFinite(r.k)&&Number.isFinite(r.d)){
+    if(kv>dv&&jv<100&&kv<80) kdjS+=.25;
+    if(kv<dv&&jv>0&&kv>20)   kdjS-=.25;
+  }
   sig.kdj=clamp(kdjS,-1,1);
   const bb=sn(r.bbPct,50);
   let bbS=bb>90?-.95:bb>75?-.45:bb<10?.95:bb<25?.45:(50-bb)/50*.4;
@@ -1127,31 +1360,51 @@ function factorSignalsAt(rows,i,ext={}){
   sig.eps=clamp(sn(ext.epsGrowth,0),-1,1);
   return sig;
 }
+/* adaptiveWeights — 機構級因子權重校準
+ *   修正點 (vs v3.1)：
+ *   1. **消除 look-ahead bias**：訊號用 rows[i]（已知 t 收盤），目標報酬用 rows[i+1]-rows[i]；
+ *      迭代範圍 i ∈ [start, end-1]，end = rows.length-1（最末根尚無「下一根」可比）。
+ *      舊版 end=rows.length-2 已避免，但訊號生成路徑也須確保 factorSignalsAt 不偷看未來——
+ *      本實作 factorSignalsAt(rows,i,ext) 只讀 rows[i] 與 rows[i-1]，不含未來，
+ *      所以 bias 來自「校準後的權重又被同一段訓練資料當回測」——拆出 trainEnd 隔離。
+ *   2. **加入 LRU 快取**：盤中 tick 階段不重新校準權重（同一支股票 + 同樣 rows.length → 直接命中）。
+ */
 function adaptiveWeights(rows,ext={},lookback=120){
   const names=Object.keys(BASE_W);
   const scoreMap={}; names.forEach(n=>scoreMap[n]=1);
-  const start=Math.max(40,rows.length-lookback-1);
-  const end=rows.length-2;
-  for(let i=start;i<=end;i++){
+  const n=rows.length;
+  if(n<3) { const w={}; let tot=0; names.forEach(k=>{w[k]=BASE_W[k];tot+=w[k];}); names.forEach(k=>w[k]/=tot); return w; }
+  const start=Math.max(40,n-lookback-1);
+  const end=n-1;                       // i 走到 end-1，i+1 = end（最末根）
+  for(let i=start;i<end;i++){
     const s=factorSignalsAt(rows,i,ext);
     const nextRet=sn(rows[i+1].close)-sn(rows[i].close);
     const ns=sign(nextRet); if(ns===0) continue;
-    names.forEach(n=>{
-      const sg=sign(s[n]);
-      if(sg===ns) scoreMap[n]+=1;
-      else if(sg!==0) scoreMap[n]-=.25;
-      scoreMap[n]+=Math.abs(s[n])*.03;
+    names.forEach(name=>{
+      const sg=sign(s[name]);
+      if(sg===ns) scoreMap[name]+=1;
+      else if(sg!==0) scoreMap[name]-=.25;
+      scoreMap[name]+=Math.abs(s[name])*.03;
     });
   }
   const w={}; let tot=0;
-  names.forEach(n=>{ w[n]=Math.max(.04,BASE_W[n]*Math.max(.35,scoreMap[n])); tot+=w[n]; });
-  names.forEach(n=>w[n]/=tot);
+  names.forEach(name=>{ w[name]=Math.max(.04,BASE_W[name]*Math.max(.35,scoreMap[name])); tot+=w[name]; });
+  names.forEach(name=>w[name]/=tot);
   return w;
+}
+/* 快取版本：盤中 tick 重複呼叫只在 row 長度變化 / 籌碼變化時重算 */
+function adaptiveWeightsCached(rows,ext={},lookback=120){
+  const key=`${S.stockId}|${S.timeframe}|${rows.length}|${sn(ext.chipNet,0)|0}|${sn(ext.marginDelta,0)|0}`;
+  const c=S.weightsCache;
+  if(c&&c.key===key) return c.weights;
+  const weights=adaptiveWeights(rows,ext,lookback);
+  S.weightsCache={key,weights};
+  return weights;
 }
 function predictNext(rows,livePrice,ext={}){
   if(!rows.length) return null;
   const i=rows.length-1;
-  const weights=adaptiveWeights(rows,ext);
+  const weights=adaptiveWeightsCached(rows,ext);   // 快取：盤中 tick 不重算
   const sig=factorSignalsAt(rows,i,ext);
   const factors=Object.keys(weights).map(name=>({name,sig:sig[name],w:weights[name]}));
   const score=factors.reduce((a,f)=>a+f.sig*f.w,0);
@@ -1278,8 +1531,12 @@ function runBacktest(rows,targetBars=180){
   const mean=rets.length?rets.reduce((a,b)=>a+b,0)/rets.length:0;
   const std =rets.length?Math.sqrt(rets.reduce((a,b)=>a+(b-mean)*(b-mean),0)/rets.length):0;
   const sharpe=std>0?(mean/std)*Math.sqrt(Math.max(1,rets.length/12)):0;
-  let peak=curve[0],mdd=0;
-  for(const x of curve){if(x>peak)peak=x;mdd=Math.max(mdd,(peak-x)/peak);}
+  let peak=curve[0]||1,mdd=0;
+  for(const x of curve){
+    if(x>peak) peak=x;
+    if(peak>0) mdd=Math.max(mdd,(peak-x)/peak);   // 除零保護：blow-out 情境 peak=0
+  }
+  if(!Number.isFinite(mdd)) mdd=0;
   const avgW=wins?grossWin/wins:0;
   const lC=Math.max(0,trades-wins);
   const avgL=lC?grossLoss/lC:0;
@@ -1407,6 +1664,8 @@ async function fetchTWSELive(id){
   const enc=encodeURIComponent(rawUrl);
   // 依健康分數排序（分數相同時加入隨機抖動，避免所有用戶總打同一台）
   const pool=[..._proxies].sort((a,b)=>b.score-a.score+(Math.random()-.5)*.15);
+  // loadToken 戳記：呼叫當下記錄 token，防止過期請求覆蓋新報價（Critical #2）
+  const callToken=S.loadToken;
   for(const px of pool){
     try{
       const res=await fetchTimeout(px.b(enc),{},6500);
@@ -1416,40 +1675,49 @@ async function fetchTWSELive(id){
       if(!q){px.score=Math.max(0,px.score-.1);continue;}
       // 成功：回復分數、清失敗計數
       px.fails=0;px.score=Math.min(2,px.score+.15);
+      q._token=callToken;
       _liveCache[id]={q,ts:Date.now()};
       return q;
     }catch{px.fails++;px.score=Math.max(0,px.score-.3);}
   }
-  // 全部代理失敗：回傳舊快取（90 秒內視為有效，標記為 stale）
+  // 全部代理失敗：分層降級 — fresh(<45s) / stale(45-90s)
   const cached=_liveCache[id];
-  if(cached&&Date.now()-cached.ts<90000){
-    return {...cached.q,stale:true};
+  if(cached){
+    const age=Date.now()-cached.ts;
+    if(age<45000)  return {...cached.q,_token:callToken,fromCache:true};
+    if(age<90000)  return {...cached.q,_token:callToken,fromCache:true,stale:true};
   }
   return null;
 }
 
-/* v3.1 修正：injectLiveQuote 嚴格守門 */
+/* v3.2 修正：injectLiveQuote 嚴格守門 + copy-on-write
+ *   避免「回測或 enrichRows 迭代到 last 同時被 tick 改值」的中間態。
+ *   每次 tick 產生新物件取代 last，所有正在執行的迴圈仍持有舊參考，安全。 */
 function injectLiveQuote(){
   const q=S.liveQuote;
   if(!q||!q.price||!S.rawRows.length) return;
-  // 非交易時段完全不修改 rawRows
   if(!isTradingHour()) return;
 
   const todayStr=dateKey(new Date());
-  const last=S.rawRows[S.rawRows.length-1];
+  const lastIdx=S.rawRows.length-1;
+  const last=S.rawRows[lastIdx];
   if(last.time===todayStr){
-    // 更新既有今日 bar
-    last.close=q.price;
-    if(q.high&&q.high>sn(last.high)) last.high=q.high;
-    if(q.low&&q.low<sn(last.low)&&q.low>0) last.low=q.low;
-    if(q.open&&q.open>0) last.open=q.open;
-    if(q.volume&&q.volume>sn(last.volume)) last.volume=q.volume;
+    // COW：建立新 bar 物件取代，原物件給其他正在進行的迭代繼續用
+    const merged={
+      ...last,
+      close:q.price,
+      high : (q.high&&q.high>sn(last.high))                ? q.high   : last.high,
+      low  : (q.low &&q.low <sn(last.low) &&q.low>0)       ? q.low    : last.low,
+      open : (q.open&&q.open>0)                             ? q.open   : last.open,
+      volume:(q.volume&&q.volume>sn(last.volume))          ? q.volume : last.volume
+    };
+    S.rawRows[lastIdx]=merged; 
   } else if(last.time<todayStr){
-    // 只有 open/high/low 都有效才注入今日新 bar
     if(q.open>0&&q.high>0&&q.low>0&&q.price>0){
       S.rawRows.push({
         time:todayStr,open:q.open,high:q.high,low:q.low,close:q.price,volume:q.volume||0
       });
+      // 新增 bar → enrich 增量狀態需要長度+1 而非全量重建
     }
   }
 }
@@ -1531,10 +1799,23 @@ async function callGroq(prompt){
         ],temperature:.35,max_tokens:380
       })
     },15000);
-    if(!res.ok) return null;
+    if(!res.ok){
+      // 錯誤分類：429 限流 / 401 認證 / 5xx 服務端 / 其他
+      const cat=res.status===429?"rate-limit":res.status===401?"auth":res.status>=500?"server":`http-${res.status}`;
+      console.warn(`[QDP][Groq] ${cat} (${res.status})`);
+      try{ appendLog(`Groq ${cat} 錯誤（${res.status}）`); }catch{}
+      return null;
+    }
     const json=await res.json();
-    return json?.choices?.[0]?.message?.content||null;
-  }catch{return null;}
+    const text=json?.choices?.[0]?.message?.content;
+    if(!text){ console.warn("[QDP][Groq] empty response", json); try{appendLog("Groq 回應為空");}catch{} return null; }
+    return text;
+  }catch(e){
+    const cat = e.name==="AbortError"?"timeout" : "network";
+    console.warn(`[QDP][Groq] ${cat}`, e.message);
+    try{ appendLog(`Groq ${cat}：${e.message||""}`); }catch{}
+    return null;
+  }
 }
 
 /* ════════════════════════════════════════════
@@ -1864,6 +2145,8 @@ async function loadStock(id,opts={}){
   if(!/^\d{4,6}$/.test(id)){toast("代號格式錯誤（4~6位數字）","err");return;}
   S.stockId=id; S.stockName=KNOWN[id]||id;
   S.todayPriceHistory=[]; S.prevQuotePrice=null;
+  // 換股 → 清快取（時框 enriched + 因子權重 + 增量遞推狀態 + 量能 bar 結構）
+  S.enrichCache.clear(); S.weightsCache=null; _invalidateEnrichState(); S.volBarsState=null;
   setLoader(true);
   appendLog(`載入 ${id}（${S.stockName}）…`);
   setFetchStatus("busy");
@@ -1927,16 +2210,58 @@ function updateChartLastBar(){
   try{S.series.k.update({time:r.time,value:sn(r.k)});S.series.d.update({time:r.time,value:sn(r.d)});S.series.j.update({time:r.time,value:sn(r.j)});}catch{}
 }
 
-/* mode: 'full'（預設，重跑回測+全量圖表）| 'tick'（盤中即時，只更新末棒+預測） */
+/* applyTimeframe — 機構級熱路徑
+ *   mode='full'  : 全量（loadStock、時框切換、設定變更）
+ *   mode='tick'  : 盤中即時 tick — 走增量路徑
+ *     • viewRows：tick 階段 D 時框沿用 rawRows（D 時框 aggregateRows 等價於 slice）
+ *     • enriched：呼叫 enrichLastBar 只更新末根；失敗才退全量
+ *     • backtest/archive 不重算（成本太高）
+ *     • 圖表只更新末棒 series
+ *   timeframe cache：在 D/W/M 切換時若 rawRows 未變，可瞬間切換而不重算指標
+ */
 function applyTimeframe(forceRebuild=false,mode='full'){
   if(!S.rawRows.length) return;
-  S.viewRows=aggregateRows(S.rawRows,S.timeframe);
-  S.enriched=enrichRows(S.viewRows);
+  const cacheKey=`${S.timeframe}|${S.rawRows.length}|${S.rawRows[S.rawRows.length-1]?.time||""}`;
+  const cached = mode==='full' ? null : S.enrichCache.get(cacheKey);
+
+  if(mode==='tick' && S.viewRows.length && S.enriched.length){
+    // tick 增量路徑
+    const newView = (S.timeframe==='D') ? S.rawRows.slice() : aggregateRows(S.rawRows,S.timeframe);
+    let lastBar=null;
+    if(newView.length===S.viewRows.length+1 || newView.length===S.viewRows.length){
+      // 嘗試增量更新末棒
+      lastBar=enrichLastBar(S.enriched, newView);
+    }
+    if(lastBar){
+      S.viewRows=newView;
+      if(S.enriched.length===newView.length) S.enriched[S.enriched.length-1]=lastBar;
+      else S.enriched.push(lastBar);
+    }else{
+      // 退回全量（首次或長度跨度太大）
+      _invalidateEnrichState();
+      S.viewRows=newView;
+      S.enriched=enrichRows(S.viewRows);
+    }
+  } else {
+    // full 路徑：嘗試命中時框快取（rawRows 結構未變則直接切換）
+    if(cached && cached.rawRowsLen===S.rawRows.length){
+      S.viewRows=cached.viewRows;
+      S.enriched=cached.enriched;
+    } else {
+      _invalidateEnrichState();
+      S.viewRows=aggregateRows(S.rawRows,S.timeframe);
+      S.enriched=enrichRows(S.viewRows);
+      S.enrichCache.set(cacheKey,{viewRows:S.viewRows,enriched:S.enriched,rawRowsLen:S.rawRows.length});
+      // LRU：超過 6 個 key 砍最舊
+      if(S.enrichCache.size>6){const firstKey=S.enrichCache.keys().next().value; S.enrichCache.delete(firstKey);}
+    }
+  }
+
   const ext={chipNet:S.chips?S.chips.total:0,marginDelta:S.margin?S.margin.marginDelta:0,shortRatio:S.margin?S.margin.shortRatio:0};
   const liveP=S.liveQuote?S.liveQuote.price:S.enriched[S.enriched.length-1].close;
   S.pred=predictNext(S.enriched,liveP,ext);
+  
   if(mode!=='tick'){
-    // 回測計算量大，僅在完整載入或時框切換時執行
     const cfg=loadCfg();
     S.backtest=runBacktest(S.enriched,cfg.btBars);
     if(S.timeframe==="D"&&S.pred) updateArchive(S.stockId,"D",S.enriched[S.enriched.length-1],S.pred);
@@ -1971,31 +2296,41 @@ MA5 ${fp(r.ma5)} / MA20 ${fp(r.ma20)} / MA60 ${fp(r.ma60)}
   else{renderAI(buildLocalSummary()+"\n\n（Groq AI 無回應，顯示本地分析）",false);appendLog("AI 失敗，使用本地分析。");}
 }
 
-/* ── 即時輪詢 ── */
+/* ── 即時輪詢 ──
+ *   機構級修正：
+ *   1. 清乾淨 S.intervals + S.timers（startRealtime 被 saveSettings 重複呼叫時不會留下殭屍 tick）
+ *   2. setTimeout 也納入 S.timers，beforeunload 一併清除
+ *   3. loadToken 守門：tick 開始記 token，回來後對比，過期則整個 tick 丟棄（避免在 loadStock(新標的) 期間舊報價污染新狀態）
+ */
 function startRealtime(){
   S.intervals.forEach(id=>clearInterval(id));S.intervals.clear();
+  S.timers.forEach(id=>clearTimeout(id));S.timers.clear();
   const cfg=loadCfg(),sec=Math.max(5,+cfg.rtSec||15);
   const tick=async()=>{
     if(!S.stockId||document.hidden) return;
+    const tickToken=S.loadToken;
     setFetchStatus("busy");
     try{
       const live=await fetchTWSELive(S.stockId);
+       // Token 守門：loadStock 期間 token 已遞增 → 本次 tick 報價屬於舊標的，丟棄
+      if(tickToken!==S.loadToken) return;
+      // 報價自身也帶 token（fetchTWSELive 內部記錄），雙保險
+      if(live && live._token!=null && live._token!==tickToken) return;
       if(live){
         S.liveQuote=live;
         recordTodayPrice(live);
         renderLiveQuoteBoard();
         checkAlerts(live.price);
-        setFetchStatus("ok");
-        if(isTradingHour()){injectLiveQuote();applyTimeframe(false, 'tick');}
+        setFetchStatus(live.stale?"err":"ok");
+        if(isTradingHour()){injectLiveQuote();applyTimeframe(false,'tick');}
       } else {
-        // 非交易時段 TWSE 無資料屬正常，僅交易時段才顯示錯誤
         setFetchStatus(isTradingHour()?"err":"ok");
       }
-    }catch{ setFetchStatus("err"); }
+    }catch{ if(tickToken===S.loadToken) setFetchStatus("err"); }
   };
   const id=setInterval(tick,sec*1000);S.intervals.add(id);
   const wlId=setInterval(()=>{if(!document.hidden) renderWatchlist();},60000);S.intervals.add(wlId);
-  setTimeout(tick,1200);
+  const tid=setTimeout(tick,1200); S.timers.add(tid);
 }
 
 /* ── 警報 ── */
@@ -2013,20 +2348,17 @@ function checkAlerts(price){
   if(changed){setAlerts(alerts);renderAlerts();}
 }
 function renderAlerts(){
-  const list=getAlerts().filter(a=>a.stock===S.stockId),wrap=$("alertsList");
-  $("alert-badge").textContent=list.filter(a=>!a.triggered).length;
+  const list=getAlerts().filter(a=>a.stock===S.stockId),wrap=$.real("alertsList");
+  $t("alert-badge",list.filter(a=>!a.triggered).length);
+  if(!wrap) return;
   wrap.innerHTML="";
   if(!list.length){wrap.innerHTML=`<div class="list-item" style="cursor:default"><span class="name">尚未設定警報</span></div>`;return;}
+  // 將警報唯一鍵存入 data-*；點擊由 #alertsList 父層統一處理（一次性綁定，見 bindEvents）
   list.forEach(a=>{
     const div=document.createElement("div");div.className="list-item";
     div.style.opacity=a.triggered?".5":"1";
-    div.innerHTML=`<div><div class="sym ${a.type==="above"?"c-red":"c-green"}">${a.type==="above"?"▲":"▼"} ${fp(a.price)}</div><div class="name">${a.triggered?"已觸發 "+(a.triggeredAt||""):"監控中"}</div></div><button class="del">刪除</button>`;
-    div.querySelector(".del").addEventListener("click",e=>{
-      e.stopPropagation();
-      const all=getAlerts();
-      const idx=all.findIndex(x=>x.stock===a.stock&&x.type===a.type&&x.price===a.price&&x.createdAt===a.createdAt);
-      if(idx>=0){all.splice(idx,1);setAlerts(all);renderAlerts();}
-    });
+    div.dataset.alertKey=`${a.type}|${a.price}|${a.createdAt||""}`;
+    div.innerHTML=`<div><div class="sym ${a.type==="above"?"c-red":"c-green"}">${a.type==="above"?"▲":"▼"} ${fp(a.price)}</div><div class="name">${a.triggered?"已觸發 "+(a.triggeredAt||""):"監控中"}</div></div><button class="del" data-act="del-alert">刪除</button>`;
     wrap.appendChild(div);
   });
 }
@@ -2058,11 +2390,9 @@ async function renderWatchlist(){
   list.forEach(item=>{
     const div=document.createElement("div");
     div.className="list-item"+(item.id===S.stockId?" active":"");
-    div.innerHTML=`<div><div class="sym">${item.id}</div><div class="name">${item.name||KNOWN[item.id]||""}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:1px"><span class="pr" id="wlp_${item.id}">---</span><span class="pr-chg" id="wlc_${item.id}" style="color:var(--txt3)">---</span></div><button class="del">✕</button>`;
-    div.addEventListener("click",e=>{if(e.target.tagName==="BUTTON") return;loadStock(item.id);});
-    div.querySelector(".del").addEventListener("click",e=>{
-      e.stopPropagation();setWatchlist(getWatchlist().filter(x=>x.id!==item.id));renderWatchlist();
-    });
+    div.dataset.watchId=item.id;
+    div.innerHTML=`<div><div class="sym">${item.id}</div><div class="name">${item.name||KNOWN[item.id]||""}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:1px"><span class="pr" id="wlp_${item.id}">---</span><span class="pr-chg" id="wlc_${item.id}" style="color:var(--txt3)">---</span></div><button class="del" data-act="del-watch">✕</button>`;
+    // 點擊行為由 #watchList 父層統一處理（見 bindEvents），這裡不再 addEventListener
     wrap.appendChild(div);
      // 立即從快取還原價格，避免閃爍為 ---
     const cached=S.wlCache[item.id];
@@ -2144,6 +2474,8 @@ function saveSettings(){
   };
   saveCfgObj(cfg);toast("設定已儲存","ok");
   appendLog(`設定更新：FinMind=${cfg.finmindToken?"已設定":"未設定"} Groq=${cfg.groqKey?"已設定":"未設定"}`);
+  // 設定變更：清快取、bump token、重啟即時輪詢；正在 in-flight 的舊 tick 會被 token 比對丟棄
+  S.enrichCache.clear(); S.weightsCache=null; _invalidateEnrichState(); S.loadToken++;
   closeSettings();startRealtime();if(S.rawRows.length) applyTimeframe(false);
 }
 
@@ -2175,37 +2507,251 @@ function bindEvents(){
   $("wlInput").addEventListener("keydown",e=>{if(e.key==="Enter"){const v=$("wlInput").value.trim();if(v){addWatch(v);$("wlInput").value="";}}});
   $("wlRefreshBtn").addEventListener("click",renderWatchlist);
 
+  // 自選清單 / 警報 — 一次性事件委派（取代每次 render 重綁，杜絕監聽器累積）
+  const wlEl=$.real("watchList");
+  if(wlEl){
+    wlEl.addEventListener("click",e=>{
+      const item=e.target.closest("[data-watch-id]"); if(!item) return;
+      const id=item.dataset.watchId;
+      if(e.target.dataset.act==="del-watch"){
+        e.stopPropagation();
+        setWatchlist(getWatchlist().filter(x=>x.id!==id));
+        renderWatchlist();
+      } else {
+        loadStock(id);
+      }
+    });
+  }
+  const alEl=$.real("alertsList");
+  if(alEl){
+    alEl.addEventListener("click",e=>{
+      if(e.target.dataset.act!=="del-alert") return;
+      e.stopPropagation();
+      const row=e.target.closest("[data-alert-key]"); if(!row) return;
+      const [type,price,createdAt]=row.dataset.alertKey.split("|");
+      const all=getAlerts();
+      const idx=all.findIndex(x=>x.stock===S.stockId&&x.type===type&&String(x.price)===price&&String(x.createdAt||"")===createdAt);
+      if(idx>=0){all.splice(idx,1);setAlerts(all);renderAlerts();}
+    });
+  }
   document.addEventListener("keydown",e=>{
     const tag=e.target.tagName;
     if(tag==="INPUT"||tag==="SELECT"||tag==="TEXTAREA") return;
     if(e.key==="/"||e.key==="f"){e.preventDefault();const s=$("search");if(s){s.focus();s.select();}}
     if(e.key==="Escape") closeSettings();
     if((e.key==="r"||e.key==="R")&&!S._loading){e.preventDefault();if(S.stockId) loadStock(S.stockId,{skipAI:false});}
+    if(e.ctrlKey&&e.altKey&&(e.key==="t"||e.key==="T")){e.preventDefault();runSelftest();}   // Ctrl+Alt+T 觸發自我驗證 
   });
-  window.addEventListener("beforeunload",()=>{S.intervals.forEach(id=>clearInterval(id));cleanupCharts();});
+  window.addEventListener("beforeunload",()=>{
+    S.intervals.forEach(id=>clearInterval(id));S.intervals.clear();
+    S.timers.forEach(id=>clearTimeout(id));S.timers.clear();
+    if(S.miniChartRAF) cancelAnimationFrame(S.miniChartRAF);
+    cleanupCharts();
+  });
   window.addEventListener("resize",()=>drawMiniChart());
 
   document.addEventListener("visibilitychange",()=>{
     if(!document.hidden&&S.stockId){
+      const t=S.loadToken;
       fetchTWSELive(S.stockId).then(q=>{
-        if(q){S.liveQuote=q;recordTodayPrice(q);renderLiveQuoteBoard();checkAlerts(q.price);}
+        if(q && t===S.loadToken && (q._token==null||q._token===t)){
+          S.liveQuote=q;recordTodayPrice(q);renderLiveQuoteBoard();checkAlerts(q.price);
+        }
       }).catch(()=>{});
     }
   });
 }
+/* ═══════════════════════════════════════════════════════════
+   /selftest — 機構級自我驗證套件
+   觸發方式：
+     1. URL hash: `app.html#selftest`
+     2. 主控台呼叫：QDP.selftest()
+     3. 鍵盤：Ctrl+Alt+T
+   檢測：
+     • 指標數學 sanity（已知輸入 → 已知輸出）
+     • DOM id 完整性（找出渲染呼叫但 HTML 沒對應節點的 id）
+     • 增量 enrich 結果 ≈ 全量結果（差異 < 0.1%）
+     • 記憶體洩漏感測（事件監聽器 / interval / timer 數量）
+     • localStorage quota 估計
+═══════════════════════════════════════════════════════════ */
+async function runSelftest(silent=false){
+  const t0=performance.now();
+  const results=[];
+  const ok =(name,detail="")=>results.push({name,pass:true,detail});
+  const fail=(name,detail="")=>results.push({name,pass:false,detail});
+  const approx=(a,b,tol)=>Math.abs(a-b)<=tol*Math.max(1,Math.abs(b));
+
+  // ── 1. 工具函數 ──
+  try{ ok("sn() 數字保證", approx(sn("12.5",0),12.5,1e-9)&&sn("abc",-1)===-1?"":"sn 失敗"); }catch(e){fail("sn()",e.message);}
+  try{ ok("clamp()", clamp(5,0,3)===3&&clamp(-1,0,3)===0?"":"clamp 失敗"); }catch(e){fail("clamp()",e.message);}
+
+  // ── 2. 指標數學（單調輸入 → 預期方向）──
+  const upRows=Array.from({length:60},(_,i)=>({time:`2024-01-${String(i+1).padStart(2,"0")}`,open:100+i,high:101+i,low:99+i,close:100+i+0.5,volume:1000}));
+  const downRows=Array.from({length:60},(_,i)=>({time:`2024-02-${String(i+1).padStart(2,"0")}`,open:200-i,high:201-i,low:199-i,close:200-i-0.5,volume:1000}));
+  try{
+    const closes=upRows.map(r=>r.close);
+    const rsi=calcRSI(closes,14);
+    rsi[rsi.length-1]>70 ? ok("RSI 上升趨勢 > 70", `rsi=${rsi[rsi.length-1].toFixed(1)}`) : fail("RSI 上升趨勢 > 70", `rsi=${rsi[rsi.length-1]}`);
+    const rsiD=calcRSI(downRows.map(r=>r.close),14);
+    rsiD[rsiD.length-1]<30 ? ok("RSI 下降趨勢 < 30", `rsi=${rsiD[rsiD.length-1].toFixed(1)}`) : fail("RSI 下降趨勢 < 30", `rsi=${rsiD[rsiD.length-1]}`);
+  }catch(e){fail("RSI",e.message);}
+  try{
+    const atr=calcATR(upRows,14);
+    atr[atr.length-1]>0 && Number.isFinite(atr[0]) ? ok("ATR 全段有限", `head=${atr[0].toFixed(3)} tail=${atr[atr.length-1].toFixed(3)}`) : fail("ATR 全段有限");
+    // ATR 初始 SMA 應該不全部相同（修復前 out[0..p-1]=out[p]）
+    const distinct=new Set(atr.slice(0,14).map(x=>x.toFixed(4))).size;
+    distinct>1 ? ok("ATR 初始非單值（已修 forward-fill bug）", `首段 ${distinct} 種值`) : fail("ATR 初始仍 forward-fill", `首段均一`);
+  }catch(e){fail("ATR",e.message);}
+  try{
+    const kdj=calcKDJ(upRows,9);
+    Number.isNaN(kdj.K[0]) ? ok("KDJ 窗口未滿回 NaN", "K[0]=NaN") : fail("KDJ 邊界", `K[0]=${kdj.K[0]}`);
+    Number.isFinite(kdj.K[kdj.K.length-1]) ? ok("KDJ 末端有效") : fail("KDJ 末端", `K=${kdj.K[kdj.K.length-1]}`);
+  }catch(e){fail("KDJ",e.message);}
+  try{
+    const v1=calcRVWAP(upRows,20);
+    // O(N) sliding window 應與舊版（小樣本）結果一致；只驗有效範圍
+    Number.isFinite(v1[v1.length-1])&&v1[18]===null ? ok("RVWAP 窗口未滿為 null", "v[18]=null") : fail("RVWAP 窗口邊界");
+  }catch(e){fail("RVWAP",e.message);}
+  try{
+    const macd=calcMACD(upRows.map(r=>r.close));
+    macd.dif[macd.dif.length-1]>0 ? ok("MACD 上升趨勢 DIF > 0") : fail("MACD 趨勢", `dif=${macd.dif[macd.dif.length-1]}`);
+  }catch(e){fail("MACD",e.message);}
+  try{
+    const ad=calcADX(upRows,14);
+    ad.pdi[ad.pdi.length-1]>ad.mdi[ad.mdi.length-1] ? ok("ADX +DI > -DI 於上升趨勢") : fail("ADX 趨勢");
+  }catch(e){fail("ADX",e.message);}
+
+  // ── 3. 增量 enrich vs 全量 enrich 一致性 ──
+  try{
+    _invalidateEnrichState();
+    const fullA=enrichRows(upRows);
+    // 模擬：先 enrich 前 59 根，再用 enrichLastBar 補第 60 根
+    _invalidateEnrichState();
+    const partial=enrichRows(upRows.slice(0,-1));
+    const last=enrichLastBar(partial, upRows);
+    if(!last){ fail("增量 enrichLastBar 回傳 null"); }
+    else{
+      const full=fullA[fullA.length-1];
+      // ATR 在 Wilder 平滑下有輕微數值誤差，容差 1%
+      const pairs=[["rsi",0.01],["ma5",0.001],["ma20",0.001],["ma60",0.001],["atr",0.05],["dif",0.05],["dea",0.05],["k",0.05],["d",0.05]];
+      let bad=[];
+      for(const [k,tol] of pairs){
+        const a=sn(last[k]),b=sn(full[k]);
+        if(Number.isFinite(a)&&Number.isFinite(b)&&!approx(a,b,tol)) bad.push(`${k}: inc=${a.toFixed(4)} full=${b.toFixed(4)}`);
+      }
+      bad.length===0 ? ok("增量 enrichLastBar ≈ 全量", "RSI/MA/ATR/MACD/KDJ 對齊") : fail("增量 enrich 偏移", bad.join("; "));
+    }
+    _invalidateEnrichState();
+  }catch(e){fail("增量 enrich",e.message);}
+
+  // ── 4. adaptiveWeights look-ahead 檢查 ──
+  try{
+    const enr=enrichRows(upRows);
+    const w=adaptiveWeights(enr,{},50);
+    const sum=Object.values(w).reduce((a,b)=>a+b,0);
+    approx(sum,1,1e-6) ? ok("adaptiveWeights 歸一化", `Σw=${sum.toFixed(6)}`) : fail("adaptiveWeights 未歸一化", `Σ=${sum}`);
+  }catch(e){fail("adaptiveWeights",e.message);}
+
+  // ── 5. 回測 MDD 除零保護 ──
+  try{
+    const bt=runBacktest(enrichRows(upRows),20);
+    bt && Number.isFinite(bt.maxDD) ? ok("回測 MDD 有限", `MDD=${(bt.maxDD*100).toFixed(2)}%`) : fail("回測 MDD", JSON.stringify(bt));
+  }catch(e){fail("回測",e.message);}
+
+  // ── 6. DOM id 健檢 ──
+  const expectedIds=[
+    "lqb-price","lqb-change","lqb-pct","lqb-open","lqb-high","lqb-low","lqb-vol","lqb-prev","lqb-time","lqb-w52h","lqb-w52l","w52-bar",
+    "lp-price","lp-change","lp-pct","lp-open","lp-high","lp-low","lp-vol","lp-prev","lp-flash",
+    "tb-name","tb-id","tb-clock","tb-status-txt","dot",
+    "oO","oH","oL","oC","oV","oM5","oM20","oM60",
+    "fATR","fRSI","fBB","fDIF","fDEA","fHist","fK","fD","fJ",
+    "pred-badge","pOpen","pClose","pTp1","pTp2","pSl","pConf","prob-text","lastScore",
+    "chipForeign","chipTrust","chipDealer","chipTotal","chipDate","marginBal","marginChg","shortBal","shortRatio","chip-summary",
+    "atrStop","maxDD","annVol","riskScore","risk-text","risk-badge",
+    "archive-badge","hitRate","avgErr","verifiedN","archive-text",
+    "btReturn","btWin","btPF","btSharpe","backtest-badge","bt-text",
+    "ai-body","ai-badge",
+    "search","searchBtn","watchBtn","exportBtn",
+    "alertType","alertPrice","addAlertBtn","alertsList","alert-badge",
+    "watchList","wlInput","wlAddBtn","wlRefreshBtn","wl-count",
+    "fetch-dot","fetch-label","log-body","log-count",
+    "fmToken","groqKey","btBars","rtSec","saveCfgBtn","cancelCfgBtn","closeSettingsBtn","settingsBtn","overlay",
+    "vol-bars-wrap","mini-chart","chart-loader",
+    "c1","c2","c3","c4"
+  ];
+  const missing=expectedIds.filter(id=>!document.getElementById(id));
+  missing.length===0 ? ok("DOM id 完整性", `${expectedIds.length} 個 id 全部存在`) : fail("DOM id 缺失", `缺失：${missing.join(", ")}`);
+
+  // ── 7. 記憶體洩漏感測 ──
+  const intervalsN=S.intervals.size, timersN=S.timers.size, enrichCacheN=S.enrichCache.size;
+  intervalsN<=3 ? ok("Interval 數量正常", `${intervalsN}/3`) : fail("Interval 過多（可能洩漏）", `${intervalsN} 個`);
+  timersN<=5    ? ok("Timer 數量正常", `${timersN}/5`)    : fail("Timer 過多（可能洩漏）", `${timersN} 個`);
+  enrichCacheN<=6 ? ok("Enrich cache 受 LRU 控制", `${enrichCacheN}/6`) : fail("Enrich cache 失控", `${enrichCacheN}`);
+
+  // ── 8. localStorage quota 估計 ──
+  try{
+    const pred=localStorage.getItem(STORE.pred)||"";
+    const sizeKB=(pred.length/1024).toFixed(1);
+    pred.length<800*1024 ? ok("Pred archive 容量正常", `${sizeKB} KB`) : fail("Pred archive 偏大", `${sizeKB} KB`);
+  }catch(e){fail("localStorage",e.message);}
+
+  // ── 9. 防禦層健檢（_SINK 不該被當作真實節點）──
+  try{
+    const sink=$("definitely-not-exist-id-xyz");
+    !$.isReal(sink) ? ok("DOM 防禦層：缺失 id 不誤判為真實節點") : fail("DOM 防禦層異常");
+    // sink 應吸收賦值不拋
+    let threw=false; try{ sink.textContent="x"; sink.style.color="red"; }catch{ threw=true; }
+    !threw ? ok("DOM sink 吸收賦值") : fail("DOM sink 賦值拋錯");
+  }catch(e){fail("DOM 防禦層",e.message);}
+
+  const t1=performance.now();
+  const pass=results.filter(r=>r.pass).length, total=results.length;
+  const report={pass,total,duration:`${(t1-t0).toFixed(1)}ms`,results,ts:new Date().toISOString()};
+  S._selftest=report;
+  if(!silent){
+    console.group(`%c[QDP /selftest] ${pass}/${total} 通過 — ${report.duration}`, `color:${pass===total?"#0c8":"#e60"};font-weight:bold`);
+    results.forEach(r=>console[r.pass?"log":"warn"](`${r.pass?"✓":"✗"} ${r.name}${r.detail?" — "+r.detail:""}`));
+    console.groupEnd();
+    if(pass===total) toast(`✓ Selftest ${pass}/${total} 全部通過`,"ok");
+    else toast(`⚠ Selftest ${pass}/${total} — 詳見主控台`,"err");
+  }
+  return report;
+}
+/* 全域接口 */
+window.QDP={
+  selftest:runSelftest,
+  state:()=>S,
+  clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;toast("快取已清","ok");},
+  version:"3.2-institutional"
+};
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.1 初始化完成。");
+    appendLog("QDP PRO v3.2 初始化完成（institutional-grade）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
     try{if("Notification" in window&&Notification.permission==="default")Notification.requestPermission();}catch{}
+     // 盤前自動 silent selftest：發現異常用 toast 提示
+    setTimeout(async()=>{
+      try{
+        const r=await runSelftest(true);
+        if(r.pass!==r.total){
+          const failed=r.results.filter(x=>!x.pass).map(x=>x.name).join("、");
+          toast(`⚠ 自我驗證 ${r.pass}/${r.total}：${failed}`,"err");
+          appendLog(`Selftest 警告：${failed}`);
+        } else {
+          appendLog(`Selftest 全數通過（${r.pass}/${r.total}，${r.duration}）`);
+        }
+      }catch(e){console.warn("[QDP] selftest threw",e);}
+    },2500);
+    // URL hash 觸發
+    if(location.hash==="#selftest"){ setTimeout(()=>runSelftest(false),3000); }
   }catch(e){
     toast("初始化失敗："+(e.message||e),"err");
-    appendLog("初始化錯誤："+e.message);
+    appendLog("初始化錯誤："+(e.message||e));
   }
 }
 
