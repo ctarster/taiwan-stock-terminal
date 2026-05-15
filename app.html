@@ -873,13 +873,40 @@ function calcRSI(prices,p=14){
   let ag=0,al=0;
   for(let i=1;i<=p;i++){ const d=prices[i]-prices[i-1]; if(d>=0)ag+=d; else al-=d; }
   ag/=p; al/=p;
-  out[p]=al===0?100:100-100/(1+ag/al);
+  // Fix: ag=al=0（完全沒有漲跌）應回 50（中性），不是 100
+  out[p]=(ag===0&&al===0)?50:al===0?100:100-100/(1+ag/al);
   for(let i=p+1;i<n;i++){
     const d=prices[i]-prices[i-1],g=d>0?d:0,l=d<0?-d:0;
     ag=(ag*(p-1)+g)/p; al=(al*(p-1)+l)/p;
-    out[i]=al===0?100:100-100/(1+ag/al);
+    out[i]=(ag===0&&al===0)?50:al===0?100:100-100/(1+ag/al);
   }
   return out;
+}
+/* ADX（趨勢強度）：ADX≥25 趨勢明確，<20 盤整 */
+function calcADX(rows,p=14){
+  const n=rows.length;
+  const adxOut=new Array(n).fill(0),pdiOut=new Array(n).fill(0),mdiOut=new Array(n).fill(0);
+  if(n<p*2+2) return {adx:adxOut,pdi:pdiOut,mdi:mdiOut};
+  const tr=new Array(n).fill(0),pdm=new Array(n).fill(0),ndm=new Array(n).fill(0);
+  for(let i=1;i<n;i++){
+    const h=sn(rows[i].high),l=sn(rows[i].low),ph=sn(rows[i-1].high),pl=sn(rows[i-1].low),pc=sn(rows[i-1].close);
+    tr[i]=Math.max(h-l,Math.abs(h-pc),Math.abs(l-pc));
+    const up=h-ph,dn=pl-l;
+    pdm[i]=(up>dn&&up>0)?up:0; ndm[i]=(dn>up&&dn>0)?dn:0;
+  }
+  let atr=0,spd=0,snd=0;
+  for(let i=1;i<=p;i++){atr+=tr[i];spd+=pdm[i];snd+=ndm[i];}
+  let prevAdx=0; const dxBuf=[];
+  for(let i=p;i<n;i++){
+    if(i>p){atr=atr-atr/p+tr[i];spd=spd-spd/p+pdm[i];snd=snd-snd/p+ndm[i];}
+    const pdi=atr>0?100*spd/atr:0,ndi=atr>0?100*snd/atr:0;
+    pdiOut[i]=pdi;mdiOut[i]=ndi;
+    const dx=(pdi+ndi>0)?100*Math.abs(pdi-ndi)/(pdi+ndi):0;
+    dxBuf.push(dx);
+    if(dxBuf.length===p){prevAdx=dxBuf.reduce((a,b)=>a+b,0)/p;adxOut[i]=prevAdx;}
+    else if(dxBuf.length>p){prevAdx=(prevAdx*(p-1)+dx)/p;adxOut[i]=prevAdx;}
+  }
+  return {adx:adxOut,pdi:pdiOut,mdi:mdiOut};
 }
 function calcATR(rows,p=14){
   const n=rows.length,out=new Array(n).fill(0);
