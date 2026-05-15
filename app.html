@@ -1639,12 +1639,16 @@ async function fetchHistory(id){
   })).sort((a,b)=>a.time.localeCompare(b.time));
 }
 
-/* ── CORS Proxy 健康池：評分輪換 + 舊資料快取保底 ── */
+/* ── CORS Proxy 健康池：評分輪換 + 舊資料快取保底 ──
+ *   首選：自架 Cloudflare Worker（< 100ms、99.99% SLA、edge cache 3s）
+ *   備援：4 個公用 proxy（Worker 異常時自動降級，不影響可用性）
+ *   評分機制：成功 +0.15、失敗 -0.25/-0.3；下次優先打分數高的 */
 const _proxies=[
-  {b:e=>`https://api.allorigins.win/raw?url=${e}`,   score:1.0, fails:0},
-  {b:e=>`https://corsproxy.io/?${e}`,                score:1.0, fails:0},
-  {b:e=>`https://api.codetabs.com/v1/proxy?quest=${e}`,score:0.9,fails:0},
-  {b:e=>`https://thingproxy.freeboard.io/fetch/${e}`, score:0.7, fails:0},
+  {b:e=>`https://qdp-proxy.thomaschi921118.workers.dev/?url=${e}`, score:2.0, fails:0, name:"cf-worker"},
+  {b:e=>`https://api.allorigins.win/raw?url=${e}`,                 score:1.0, fails:0, name:"allorigins"},
+  {b:e=>`https://corsproxy.io/?${e}`,                              score:1.0, fails:0, name:"corsproxy"},
+  {b:e=>`https://api.codetabs.com/v1/proxy?quest=${e}`,            score:0.9, fails:0, name:"codetabs"},
+  {b:e=>`https://thingproxy.freeboard.io/fetch/${e}`,              score:0.7, fails:0, name:"thingproxy"},
 ];
 const _liveCache={}; // id → {q, ts}
 
