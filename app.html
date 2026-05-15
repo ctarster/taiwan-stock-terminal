@@ -1101,52 +1101,122 @@ function predictNext(rows,livePrice,ext={}){
   };
 }
 
-/* ═══════════ Walk-Forward 回測 ═══════════ */
+/* ═══════════ Walk-Forward 波段回測（台灣現貨/零股 State Machine）═══════════
+   狀態：FLAT → LONG → FLAT
+   ‧ 僅做多（台灣現貨/零股不支援一般放空）
+   ‧ 進場：訊號K棒收盤後，下一根開盤買入
+   ‧ 出場：止損 / 止盈 / 反向訊號 / 超時強制出場
+   ‧ 費用：買賣手續費（28折）+ 證交稅（賣方）
+═══════════════════════════════════════════════════════════════════════════ */
 function runBacktest(rows,targetBars=180){
   if(rows.length<80) return null;
   const trainEnd=Math.max(60,rows.length-targetBars-1);
-  const trainRows=rows.slice(0,trainEnd+1);
-  const frozenW=adaptiveWeights(trainRows,{},120);
+  const frozenW=adaptiveWeights(rows.slice(0,trainEnd+1),{},120);
   const wKeys=Object.keys(frozenW);
-  const FEE=0.001425*0.28,TAX=0.003;
+  
+  // 台灣現貨手續費（28折）+ 證交稅（僅賣方）
+  const BUY_FEE =0.001425*0.28;
+  const SELL_FEE=0.001425*0.28;
+  const TAX     =0.003;
+  const COST    =BUY_FEE+SELL_FEE+TAX;
+
+  // 波段參數
+  const TP_MULT =2.0;   // 止盈 ATR 倍數
+  const SL_MULT =1.2;   // 止損 ATR 倍數
+  const MAX_HOLD=20;    // 最大持倉K棒數
+  const ENTRY_TH=0.08;  // 買入訊號門檻
+  const EXIT_TH =-0.05; // 賣出訊號門檻
+
+  // 狀態機
+  let state='FLAT',entryPrice=0,stopLoss=0,takeProfit=0,holdBars=0;
   let equity=1,grossWin=0,grossLoss=0,wins=0,trades=0,errSum=0;
   const curve=[1];
-  for(let i=trainEnd;i<rows.length-1;i++){
+  
+  for(let i=trainEnd;i<rows.length;i++){
+    const cur=rows[i];
+    if(!cur){curve.push(equity);continue;}
+    const atr=Math.max(0.01,sn(cur.atr,cur.close*0.02));
     const sig=factorSignalsAt(rows,i,{});
     let score=0;
     for(const n of wKeys) score+=sig[n]*frozenW[n];
-    const cur=rows[i],nxt=rows[i+1];
-    if(!cur||!nxt||!nxt.open||!nxt.close){curve.push(equity);continue;}
-    const atr=Math.max(0.01,sn(cur.atr,cur.close*.02));
-    const evClose=cur.close+score*atr*(0.55+Math.abs(score)*1.25);
-    errSum+=Math.abs(evClose-nxt.close)/Math.max(.01,cur.close);
-    const dir=score>0.08?1:score<-0.08?-1:0;
-    if(dir===0){curve.push(equity);continue;}
-    trades++;
-    const entry=nxt.open;
-    const tp=cur.close+dir*atr*1.15;
-    const sl=cur.close-dir*atr*1.05;
-    let exit=nxt.close;
-    if(dir===1){ if(nxt.low<=sl) exit=sl; else if(nxt.high>=tp) exit=tp; }
-    else { if(nxt.high>=sl) exit=sl; else if(nxt.low<=tp) exit=tp; }
-    const pnl=(dir===1?(exit-entry)/entry:(entry-exit)/entry)-(FEE*2+TAX);
-    if(pnl>0){wins++;grossWin+=pnl;}else{grossLoss+=Math.abs(pnl);}
-    equity*=(1+pnl); curve.push(equity);
+    
+    // 預測誤差（信號品質監控，與持倉邏輯無關）
+    if(i<rows.length-1){
+      const nxt=rows[i+1];
+      if(nxt?.close){
+        const ev=cur.close+score*atr*(0.55+Math.abs(score)*1.25);
+        errSum+=Math.abs(ev-nxt.close)/Math.max(0.01,cur.close);
+      }
+    }
+
+    if(state==='FLAT'){
+      // 多方進場：下一根開盤買入
+      if(score>ENTRY_TH && i<rows.length-1){
+        const nxt=rows[i+1];
+        if(!nxt?.open){curve.push(equity);continue;}
+        entryPrice=nxt.open;
+        stopLoss  =entryPrice-atr*SL_MULT;
+        takeProfit=entryPrice+atr*TP_MULT;
+        holdBars  =0;
+        state     ='LONG';
+      }
+      curve.push(equity);
+
+    }else{ // LONG
+      holdBars++;
+      let exitPrice=0,exited=false;
+
+      if(cur.low<=stopLoss){
+        // 止損：當根K棒內觸及止損線
+        exitPrice=stopLoss; exited=true;
+      }else if(cur.high>=takeProfit){
+        // 止盈：當根K棒內觸及止盈線
+        exitPrice=takeProfit; exited=true;
+      }else if(score<EXIT_TH){
+        // 反向訊號：以收盤價出場（日K可視為隔日市價賣出的保守近似）
+        exitPrice=cur.close; exited=true;
+      }else if(holdBars>=MAX_HOLD){
+        // 超時強制出場
+        exitPrice=cur.close; exited=true;
+      }
+
+      if(exited){
+        const pnl=(exitPrice-entryPrice)/entryPrice-COST;
+        trades++;
+        if(pnl>0){wins++;grossWin+=pnl;}else{grossLoss+=Math.abs(pnl);}
+        equity*=(1+pnl);
+        state='FLAT';
+      }
+      curve.push(equity);
+    }
+    
+  }
+  
+  // 測試期結束仍持倉 → 以最後收盤強制出場
+  if(state==='LONG'){
+    const last=rows[rows.length-1];
+    if(last?.close){
+      const pnl=(last.close-entryPrice)/entryPrice-COST;
+      trades++;
+      if(pnl>0){wins++;grossWin+=pnl;}else{grossLoss+=Math.abs(pnl);}
+      equity*=(1+pnl);
+    }
   }
   const winRate=trades?wins/trades:0;
   const pf=grossLoss>0?grossWin/grossLoss:(grossWin>0?9.99:0);
   const rets=[];
   for(let i=1;i<curve.length;i++) rets.push((curve[i]-curve[i-1])/curve[i-1]);
   const mean=rets.length?rets.reduce((a,b)=>a+b,0)/rets.length:0;
-  const std=rets.length?Math.sqrt(rets.reduce((a,b)=>a+(b-mean)*(b-mean),0)/rets.length):0;
+  const std =rets.length?Math.sqrt(rets.reduce((a,b)=>a+(b-mean)*(b-mean),0)/rets.length):0;
   const sharpe=std>0?(mean/std)*Math.sqrt(Math.max(1,rets.length/12)):0;
   let peak=curve[0],mdd=0;
   for(const x of curve){if(x>peak)peak=x;mdd=Math.max(mdd,(peak-x)/peak);}
   const avgW=wins?grossWin/wins:0;
   const lC=Math.max(0,trades-wins);
   const avgL=lC?grossLoss/lC:0;
-  const kelly=clamp(avgL>0?((pf*winRate-(1-winRate))/pf)*.5:0,0,.25);
-  return {totalReturn:equity-1,winRate,profitFactor:pf,sharpeLike:sharpe,trades,maxDD:mdd,avgErr:trades?errSum/trades:0,avgWin:avgW,avgLoss:avgL,kelly,trainBars:trainEnd,testBars:Math.max(0,trades)};
+  const kelly=clamp(avgL>0?((pf*winRate-(1-winRate))/pf)*0.5:0,0,0.25);
+  const errN=rows.length-trainEnd-1;
+  return {totalReturn:equity-1,winRate,profitFactor:pf,sharpeLike:sharpe,trades,maxDD:mdd,avgErr:errN>0?errSum/errN:0,avgWin:avgW,avgLoss:avgL,kelly,trainBars:trainEnd,testBars:Math.max(0,trades)};
 }
 
 /* ── Archive ── */
