@@ -1702,24 +1702,42 @@ function setLoader(on){
   if(el) el.style.display=on?"flex":"none";
 }
 
-function applyTimeframe(forceRebuild=false){
+/* 盤中 tick 專用：只更新最後一根 K 棒（series.update），不重繪全量 */
+function updateChartLastBar(){
+  if(!S.enriched.length||!S.series.candle) return;
+  const r=S.enriched[S.enriched.length-1];
+  const upd=(ser,v)=>{if(ser&&Number.isFinite(v)) try{ser.update({time:r.time,value:v});}catch{}};
+  try{S.series.candle.update({time:r.time,open:sn(r.open),high:sn(r.high),low:sn(r.low),close:sn(r.close)});}catch{}
+  upd(S.series.ma5,r.ma5);upd(S.series.ma20,r.ma20);upd(S.series.ma60,r.ma60);upd(S.series.ma120,r.ma120);
+  upd(S.series.bbUpper,r.bbUpper);upd(S.series.bbLower,r.bbLower);upd(S.series.vwap,r.vwap);
+  try{S.series.vol.update({time:r.time,value:sn(r.volume),color:r.close>=r.open?"rgba(255,68,68,.5)":"rgba(0,204,136,.5)"});}catch{}
+  try{S.series.dif.update({time:r.time,value:sn(r.dif)});S.series.dea.update({time:r.time,value:sn(r.dea)});}catch{}
+  try{S.series.hist.update({time:r.time,value:sn(r.hist),color:r.hist>=0?"rgba(255,68,68,.6)":"rgba(0,204,136,.6)"});}catch{}
+  try{S.series.k.update({time:r.time,value:sn(r.k)});S.series.d.update({time:r.time,value:sn(r.d)});S.series.j.update({time:r.time,value:sn(r.j)});}catch{}
+}
+
+/* mode: 'full'（預設，重跑回測+全量圖表）| 'tick'（盤中即時，只更新末棒+預測） */
+function applyTimeframe(forceRebuild=false,mode='full'){
   if(!S.rawRows.length) return;
   S.viewRows=aggregateRows(S.rawRows,S.timeframe);
   S.enriched=enrichRows(S.viewRows);
   const ext={chipNet:S.chips?S.chips.total:0,marginDelta:S.margin?S.margin.marginDelta:0,shortRatio:S.margin?S.margin.shortRatio:0};
   const liveP=S.liveQuote?S.liveQuote.price:S.enriched[S.enriched.length-1].close;
   S.pred=predictNext(S.enriched,liveP,ext);
-  const cfg=loadCfg();
-  S.backtest=runBacktest(S.enriched,cfg.btBars);
-  if(S.timeframe==="D"&&S.pred) updateArchive(S.stockId,"D",S.enriched[S.enriched.length-1],S.pred);
-  S.archiveStats=calcArchiveStats(S.stockId,S.timeframe);
+  if(mode!=='tick'){
+    // 回測計算量大，僅在完整載入或時框切換時執行
+    const cfg=loadCfg();
+    S.backtest=runBacktest(S.enriched,cfg.btBars);
+    if(S.timeframe==="D"&&S.pred) updateArchive(S.stockId,"D",S.enriched[S.enriched.length-1],S.pred);
+    S.archiveStats=calcArchiveStats(S.stockId,S.timeframe);
+  }
 
   const needRebuild=forceRebuild||!S.chartsBuilt||S.prevTimeframe!==S.timeframe;
   if(needRebuild){buildCharts();S.prevTimeframe=S.timeframe;}
-  setChartsData();
+  if(mode==='tick'&&!needRebuild){updateChartLastBar();}else{setChartsData();}
   renderVolBars();
-  renderOhlc();renderPrediction();renderRisk();renderArchive();renderBacktest();
-  renderAI(buildLocalSummary(),false);
+  renderOhlc();renderPrediction();renderRisk();
+  if(mode!=='tick'){renderArchive();renderBacktest();renderAI(buildLocalSummary(),false);}
 }
 
 async function refreshAI(){
