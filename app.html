@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>QDP PRO v3.1 — 機構級量化終端</title>
+<title>QDP PRO v3.2 — 機構級量化終端</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
@@ -167,7 +167,8 @@ button,input,select{font:inherit}
 #c2,#c3,#c4{height:88px;flex-shrink:0}
 /* Pane label */
 .pane-lbl{position:absolute;top:4px;left:8px;font-size:8px;font-family:var(--mono);color:var(--txt3);z-index:2;letter-spacing:.8px;pointer-events:none}
-#tech-strip{padding:5px 10px;border-top:1px solid var(--line0);display:grid;grid-template-columns:repeat(9,1fr);gap:4px;background:var(--bg1);flex-shrink:0}
+#tech-strip{padding:5px 10px;border-top:1px solid var(--line0);display:grid;grid-template-columns:repeat(10,1fr);gap:4px;background:var(--bg1);flex-shrink:0}
+#pivot-bar{padding:3px 10px;border-top:1px solid var(--line0);background:var(--bg0);font-size:9px;font-family:var(--mono);color:var(--txt3);flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ts-item{text-align:center}
 .ts-lbl{font-size:8px;color:var(--txt3);letter-spacing:.5px}
 .ts-val{font-size:10px;font-family:var(--mono);font-weight:600}
@@ -462,6 +463,8 @@ button,input,select{font:inherit}
           MA5 <b id="oM5" style="color:var(--yellow)">---</b>
           MA20 <b id="oM20" style="color:var(--blue)">---</b>
           MA60 <b id="oM60" style="color:var(--purple)">---</b>
+          MA120 <b id="oM120" style="color:var(--orange)">---</b>
+          VWAP <b id="oVWAP" style="color:var(--cyan)">---</b>
         </span>
       </div>
       <div id="chart-wrap">
@@ -481,7 +484,9 @@ button,input,select{font:inherit}
         <div class="ts-item"><div class="ts-lbl">K</div><div class="ts-val" id="fK">--</div></div>
         <div class="ts-item"><div class="ts-lbl">D</div><div class="ts-val" id="fD">--</div></div>
         <div class="ts-item"><div class="ts-lbl">J</div><div class="ts-val" id="fJ">--</div></div>
+        <div class="ts-item"><div class="ts-lbl">VWAP</div><div class="ts-val" id="fVWAP">--</div></div>
       </div>
+      <div id="pivot-bar"><span id="pivot-summary">Pivot 計算中…</span></div>
     </div>
 
     <!-- ═══ RIGHT COL ═══ -->
@@ -577,12 +582,18 @@ button,input,select{font:inherit}
     <div class="sp-body">
       <div class="fg">
         <label>FinMind Token（建議填入以提高 API 限制）</label>
-        <input id="fmToken" type="password" placeholder="token...">
+        <div style="display:flex;gap:5px">
+          <input id="fmToken" type="password" placeholder="token..." style="flex:1">
+          <button class="tb-btn" style="padding:4px 8px;font-size:11px" onclick="const i=document.getElementById('fmToken');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'👁':'🙈'">👁</button>
+        </div>
         <div class="hint">免費註冊：finmindtrade.com，提高每日 API 呼叫限制</div>
       </div>
       <div class="fg">
         <label>Groq API Key（AI 交叉驗證，選填）</label>
-        <input id="groqKey" type="password" placeholder="gsk_...">
+        <div style="display:flex;gap:5px">
+          <input id="groqKey" type="password" placeholder="gsk_..." style="flex:1">
+          <button class="tb-btn" style="padding:4px 8px;font-size:11px" onclick="const i=document.getElementById('groqKey');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'👁':'🙈'">👁</button>
+        </div>
         <div class="hint">免費申請：console.groq.com，啟用 AI 交叉驗證功能</div>
       </div>
       <div class="fg" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
@@ -616,18 +627,22 @@ button,input,select{font:inherit}
 <script>
 "use strict";
 /* ================================================================
-   QDP PRO v3.1 — 機構級量化決策終端
-   v3.1 改進清單：
-   1. 即時股價看板（左欄頂部）：大字價格 + 今日迷你走勢 Canvas
-   2. TopBar 橫向即時行情列：開高低量昨收全部顯示
-   3. 即時報價 Flash 動畫：每次更新閃爍上漲/下跌色
-   4. 52 週高低位置條，視覺化股價相對位置
-   5. injectLiveQuote 修正：盤後不污染，今日 bar 完整欄位才注入
-   6. 自選清單顯示漲跌幅（delta），非只有現價
-   7. 狀態列顯示 fetch 狀態燈、即時時鐘
-   8. 圖表 pane 標籤，方便識別
-   9. 系統日誌顯示行數 badge
-   10. 設定介面加 hint 說明文字
+   QDP PRO v3.2 — 機構級量化決策終端
+   v3.2 改進清單：
+   1. [修正] 回測 badge 顏色符合台股慣例（正報酬紅色）
+   2. [新增] 布林通道上下軌線（虛線）顯示於主圖
+   3. [新增] EMA120 橘色虛線（機構長線趨勢參考）
+   4. [新增] 20日 Rolling VWAP 青色線顯示於主圖與 tech strip
+   5. [新增] Pivot Points（支撐壓力）水平線自動標示於主圖
+   6. [新增] Crosshair 懸停即時更新 OHLC 條（離開恢復最新 bar）
+   7. [新增] OHLC strip 加入 MA120、VWAP 欄位
+   8. [新增] Tech strip 加 VWAP 欄（共 10 欄），MACD/J 顏色標示
+   9. [新增] Pivot 摘要列（PP/R1/S1 現價相對位置）
+   10. [新增] lp-flash 側邊燈啟動（漲紅/跌綠閃爍）
+   11. [新增] 鍵盤快捷鍵：/ 聚焦搜尋、Esc 關閉設定、R 重新載入
+   12. [新增] 設定面板密碼欄 show/hide 切換
+   13. [新增] 自選清單每 60 秒自動刷新報價
+   14. [修正] 收盤價 oC 顯示紅/綠顏色
 ================================================================ */
 
 const KNOWN = {
@@ -673,7 +688,7 @@ const S = {
   chips:null, margin:null,
   w52high:null, w52low:null,
   pred:null, backtest:null, archiveStats:null,
-  charts:{}, series:{}, resizeObs:null,
+  charts:{}, series:{}, resizeObs:null, pivotLines:[],
   intervals:new Set(), loadToken:0,
   watchInflight:false, prevTimeframe:null,
   chartsBuilt:false, logCount:0
@@ -888,6 +903,37 @@ function calcKDJ(rows,p=9){
   }
   return {K,D,J};
 }
+function calcBBBands(prices,p=20,m=2){
+  const n=prices.length;
+  const upper=new Array(n).fill(null),lower=new Array(n).fill(null),mid=new Array(n).fill(null);
+  if(n<p) return {upper,lower,mid};
+  let sum=0,sq=0;
+  for(let i=0;i<p;i++){sum+=prices[i];sq+=prices[i]*prices[i];}
+  for(let i=p-1;i<n;i++){
+    if(i>=p){sum+=prices[i]-prices[i-p];sq+=prices[i]*prices[i]-prices[i-p]*prices[i-p];}
+    const mean=sum/p,v=Math.max(0,sq/p-mean*mean),std=Math.sqrt(v);
+    upper[i]=mean+m*std; lower[i]=mean-m*std; mid[i]=mean;
+  }
+  return {upper,lower,mid};
+}
+function calcRVWAP(rows,p=20){
+  const n=rows.length,out=new Array(n).fill(null);
+  for(let i=p-1;i<n;i++){
+    let pv=0,v=0;
+    for(let j=i-p+1;j<=i;j++){
+      const tp=(sn(rows[j].high)+sn(rows[j].low)+sn(rows[j].close))/3;
+      const vol=sn(rows[j].volume); pv+=tp*vol; v+=vol;
+    }
+    out[i]=v>0?pv/v:sn(rows[i].close);
+  }
+  return out;
+}
+function calcPivots(rows){
+  if(rows.length<2) return null;
+  const p=rows[rows.length-2];
+  const pp=(sn(p.high)+sn(p.low)+sn(p.close))/3;
+  return {pp,r1:2*pp-sn(p.low),r2:pp+(sn(p.high)-sn(p.low)),s1:2*pp-sn(p.high),s2:pp-(sn(p.high)-sn(p.low))};
+}
 function calcBBPct(prices,p=20,m=2){
   const n=prices.length,out=new Array(n).fill(50);
   if(n<p) return out;
@@ -904,18 +950,23 @@ function calcBBPct(prices,p=20,m=2){
 function enrichRows(rows){
   const closes=rows.map(r=>sn(r.close));
   const vols=rows.map(r=>sn(r.volume));
-  const ma5=sma(closes,5),ma20=sma(closes,20),ma60=sma(closes,60);
+  const ma5=sma(closes,5),ma20=sma(closes,20),ma60=sma(closes,60),ma120=ema(closes,120);
   const rsi=calcRSI(closes,14),atr=calcATR(rows,14);
   const macd=calcMACD(closes),kdj=calcKDJ(rows,9),bb=calcBBPct(closes,20,2);
+  const bbBands=calcBBBands(closes,20,2);
+  const vwap=calcRVWAP(rows,20);
   const vr=new Array(vols.length).fill(1);
   for(let i=5;i<vols.length;i++){
     let s=0; for(let j=i-5;j<i;j++) s+=vols[j];
     vr[i]=s?vols[i]/(s/5):1;
   }
   return rows.map((r,i)=>({
-    ...r,ma5:ma5[i],ma20:ma20[i],ma60:ma60[i],rsi:rsi[i],atr:atr[i],
+    ...r,ma5:ma5[i],ma20:ma20[i],ma60:ma60[i],ma120:ma120[i],
+    rsi:rsi[i],atr:atr[i],
     dif:macd.dif[i],dea:macd.dea[i],hist:macd.hist[i],
-    k:kdj.K[i],d:kdj.D[i],j:kdj.J[i],bbPct:bb[i],vr:vr[i]
+    k:kdj.K[i],d:kdj.D[i],j:kdj.J[i],bbPct:bb[i],
+    bbUpper:bbBands.upper[i],bbLower:bbBands.lower[i],bbMid:bbBands.mid[i],
+    vwap:vwap[i],vr:vr[i]
   }));
 }
 
@@ -1281,11 +1332,18 @@ function renderLiveQuoteBoard(){
     const oldPrice=S.prevQuotePrice;
     priceEl.textContent=fp(q.price);
     priceEl.style.color=col;
-    // Flash 動畫
     if(oldPrice!==null&&oldPrice!==q.price){
       priceEl.classList.remove("flash-up","flash-dn");
-      void priceEl.offsetWidth; // reflow
+      void priceEl.offsetWidth;
       priceEl.classList.add(q.price>oldPrice?"flash-up":"flash-dn");
+      // TopBar lp-flash 側邊燈
+      const lpf=$("lp-flash");
+      if(lpf){
+        lpf.style.background=q.price>oldPrice?"var(--red)":"var(--green)";
+        lpf.style.opacity="1";
+        clearTimeout(lpf._t);
+        lpf._t=setTimeout(()=>{lpf.style.opacity="0";},400);
+      }
     }
   }
   S.prevQuotePrice=q.price;
@@ -1337,15 +1395,29 @@ function renderLiveQuoteBoard(){
 
 function renderOhlc(){
   const r=S.enriched[S.enriched.length-1];if(!r) return;
-  $("oO").textContent=fp(r.open);$("oH").textContent=fp(r.high);
-  $("oL").textContent=fp(r.low);$("oC").textContent=fp(r.close);
+  $("oO").textContent=fp(r.open);$("oH").textContent=fp(r.high);$("oL").textContent=fp(r.low);
+  const cEl=$("oC");cEl.textContent=fp(r.close);cEl.style.color=r.close>=r.open?"var(--red)":"var(--green)";
   $("oV").textContent=fv(r.volume);
   $("oM5").textContent=fp(r.ma5);$("oM20").textContent=fp(r.ma20);$("oM60").textContent=fp(r.ma60);
+  if($("oM120"))$("oM120").textContent=fp(r.ma120);
+  if($("oVWAP"))$("oVWAP").textContent=fp(r.vwap);
   $("fATR").textContent=fp(r.atr);$("fRSI").textContent=fp(r.rsi);$("fBB").textContent=fp(r.bbPct);
   $("fDIF").textContent=fp(r.dif);$("fDEA").textContent=fp(r.dea);$("fHist").textContent=fp(r.hist);
   $("fK").textContent=fp(r.k);$("fD").textContent=fp(r.d);$("fJ").textContent=fp(r.j);
+  if($("fVWAP"))$("fVWAP").textContent=fp(r.vwap);
   const rsiEl=$("fRSI");
   rsiEl.style.color=r.rsi>70?"var(--red)":r.rsi<30?"var(--green)":"var(--txt0)";
+  const histEl=$("fHist");
+  histEl.style.color=r.hist>=0?"var(--red)":"var(--green)";
+  const jEl=$("fJ");
+  jEl.style.color=r.j>80?"var(--red)":r.j<20?"var(--green)":"var(--txt0)";
+  // Pivot Points 摘要更新
+  const pv=calcPivots(S.enriched);
+  if(pv&&$("pivot-summary")){
+    const lp=S.liveQuote?.price||r.close;
+    const pos=lp>=pv.r1?"壓力R1↑":lp>=pv.pp?"PP上方":lp>=pv.s1?"PP下方":"支撐S1↓";
+    $("pivot-summary").textContent=`PP ${fp(pv.pp)} | R1 ${fp(pv.r1)} | S1 ${fp(pv.s1)} | ${pos}`;
+  }
 }
 
 function renderPrediction(){
@@ -1435,7 +1507,7 @@ function renderBacktest(){
   $("btWin").textContent=(b.winRate*100).toFixed(1)+"%";
   $("btPF").textContent=b.profitFactor.toFixed(2);
   $("btSharpe").textContent=b.sharpeLike.toFixed(2);
-  badge.className="sec-badge "+(b.totalReturn>=0?"t-green":"t-red");
+  badge.className="sec-badge "+(b.totalReturn>=0?"t-red":"t-green");
   badge.textContent=`WF ${b.trades}筆`;
   $("bt-text").textContent=`Walk-Forward 測試集 ${b.trades} 筆 / 訓練集 ${b.trainBars} 根。勝率 ${(b.winRate*100).toFixed(1)}%、PF ${b.profitFactor.toFixed(2)}、Sharpe ${b.sharpeLike.toFixed(2)}、MDD ${(b.maxDD*100).toFixed(1)}%、均誤差 ${(b.avgErr*100).toFixed(2)}%。`;
 }
@@ -1481,6 +1553,10 @@ function buildCharts(){
   S.series.ma5=S.charts.c1.addLineSeries({color:"#f0b429",lineWidth:1,priceLineVisible:false});
   S.series.ma20=S.charts.c1.addLineSeries({color:"#3a8ff5",lineWidth:1,priceLineVisible:false});
   S.series.ma60=S.charts.c1.addLineSeries({color:"#a78bfa",lineWidth:1,priceLineVisible:false});
+  S.series.ma120=S.charts.c1.addLineSeries({color:"#fb923c",lineWidth:1,lineStyle:2,priceLineVisible:false});
+  S.series.bbUpper=S.charts.c1.addLineSeries({color:"rgba(167,139,250,.45)",lineWidth:1,lineStyle:3,priceLineVisible:false});
+  S.series.bbLower=S.charts.c1.addLineSeries({color:"rgba(167,139,250,.45)",lineWidth:1,lineStyle:3,priceLineVisible:false});
+  S.series.vwap=S.charts.c1.addLineSeries({color:"#22d3ee",lineWidth:1,lineStyle:1,priceLineVisible:false});
   S.series.vol=S.charts.c2.addHistogramSeries({priceFormat:{type:"volume"},priceScaleId:"vol"});
   S.charts.c2.priceScale("vol").applyOptions({scaleMargins:{top:.1,bottom:0}});
   S.series.dif=S.charts.c3.addLineSeries({color:"#22d3ee",lineWidth:1,priceLineVisible:false});
@@ -1496,6 +1572,21 @@ function buildCharts(){
       if(!r) return;
       charts.forEach(o=>{if(o!==c){try{o.timeScale().setVisibleLogicalRange(r);}catch{}}});
     });
+  });
+
+  // Crosshair: 懸停時即時更新 OHLC 條，離開時恢復最新 bar
+  S.charts.c1.subscribeCrosshairMove(param=>{
+    if(!param.time||!param.seriesData||param.seriesData.size===0){renderOhlc();return;}
+    const c=param.seriesData.get(S.series.candle);
+    if(!c) return;
+    $("oO").textContent=fp(c.open);$("oH").textContent=fp(c.high);$("oL").textContent=fp(c.low);
+    const cEl=$("oC");cEl.textContent=fp(c.close);cEl.style.color=c.close>=c.open?"var(--red)":"var(--green)";
+    const vs=param.seriesData.get(S.series.vol);if(vs)$("oV").textContent=fv(vs.value);
+    const m5s=param.seriesData.get(S.series.ma5);if(m5s)$("oM5").textContent=fp(m5s.value);
+    const m20s=param.seriesData.get(S.series.ma20);if(m20s)$("oM20").textContent=fp(m20s.value);
+    const m60s=param.seriesData.get(S.series.ma60);if(m60s)$("oM60").textContent=fp(m60s.value);
+    const m120s=param.seriesData.get(S.series.ma120);if(m120s)$("oM120").textContent=fp(m120s.value);
+    const vws=param.seriesData.get(S.series.vwap);if(vws)$("oVWAP").textContent=fp(vws.value);
   });
 
   S.resizeObs=new ResizeObserver(()=>{
@@ -1519,6 +1610,10 @@ function setChartsData(){
     S.series.ma5.setData(rows.filter(r=>Number.isFinite(r.ma5)).map(r=>({time:r.time,value:r.ma5})));
     S.series.ma20.setData(rows.filter(r=>Number.isFinite(r.ma20)).map(r=>({time:r.time,value:r.ma20})));
     S.series.ma60.setData(rows.filter(r=>Number.isFinite(r.ma60)).map(r=>({time:r.time,value:r.ma60})));
+    S.series.ma120.setData(rows.filter(r=>Number.isFinite(r.ma120)).map(r=>({time:r.time,value:r.ma120})));
+    S.series.bbUpper.setData(rows.filter(r=>Number.isFinite(r.bbUpper)).map(r=>({time:r.time,value:r.bbUpper})));
+    S.series.bbLower.setData(rows.filter(r=>Number.isFinite(r.bbLower)).map(r=>({time:r.time,value:r.bbLower})));
+    S.series.vwap.setData(rows.filter(r=>Number.isFinite(r.vwap)).map(r=>({time:r.time,value:r.vwap})));
     S.series.vol.setData(rows.map(r=>({time:r.time,value:r.volume,color:r.close>=r.open?"rgba(255,68,68,.5)":"rgba(0,204,136,.5)"})));
     S.series.dif.setData(rows.map(r=>({time:r.time,value:sn(r.dif)})));
     S.series.dea.setData(rows.map(r=>({time:r.time,value:sn(r.dea)})));
@@ -1526,6 +1621,13 @@ function setChartsData(){
     S.series.k.setData(rows.map(r=>({time:r.time,value:sn(r.k)})));
     S.series.d.setData(rows.map(r=>({time:r.time,value:sn(r.d)})));
     S.series.j.setData(rows.map(r=>({time:r.time,value:sn(r.j)})));
+    // Pivot price lines（前一根 bar 計算）
+    if(S.pivotLines){S.pivotLines.forEach(l=>{try{S.series.candle.removePriceLine(l);}catch{}});} S.pivotLines=[];
+    const pv=calcPivots(rows);
+    if(pv){
+      const pvDef=[{v:pv.r2,c:"rgba(255,68,68,.5)",t:"R2"},{v:pv.r1,c:"rgba(255,68,68,.7)",t:"R1"},{v:pv.pp,c:"rgba(240,180,41,.8)",t:"PP"},{v:pv.s1,c:"rgba(0,204,136,.7)",t:"S1"},{v:pv.s2,c:"rgba(0,204,136,.5)",t:"S2"}];
+      pvDef.forEach(d=>{try{S.pivotLines.push(S.series.candle.createPriceLine({price:d.v,color:d.c,lineWidth:1,lineStyle:3,axisLabelVisible:true,title:d.t}));}catch{}});
+    }
     S.charts.c1.timeScale().fitContent();
   }catch(e){appendLog("圖表渲染錯誤："+e.message);}
 }
@@ -1557,6 +1659,7 @@ async function loadStock(id,opts={}){
     const live=liveR.status==="fulfilled"?liveR.value:null;
 
     if(live?.name) S.stockName=live.name.replace(/\s+/g,"");
+    document.title=`${S.stockName}(${S.stockId}) — QDP PRO v3.2`;
     if(live){
       S.liveQuote=live;
       recordTodayPrice(live);
@@ -1647,6 +1750,7 @@ function startRealtime(){
     }catch{ setFetchStatus("err"); }
   };
   const id=setInterval(tick,sec*1000);S.intervals.add(id);
+  const wlId=setInterval(()=>{if(!document.hidden) renderWatchlist();},60000);S.intervals.add(wlId);
   setTimeout(tick,1200);
 }
 
@@ -1809,6 +1913,13 @@ function bindEvents(){
   $("wlInput").addEventListener("keydown",e=>{if(e.key==="Enter"){const v=$("wlInput").value.trim();if(v){addWatch(v);$("wlInput").value="";}}});
   $("wlRefreshBtn").addEventListener("click",renderWatchlist);
 
+  document.addEventListener("keydown",e=>{
+    const tag=e.target.tagName;
+    if(tag==="INPUT"||tag==="SELECT"||tag==="TEXTAREA") return;
+    if(e.key==="/"||e.key==="f"){e.preventDefault();const s=$("search");if(s){s.focus();s.select();}}
+    if(e.key==="Escape") closeSettings();
+    if(e.key==="r"||e.key==="R"){e.preventDefault();if(S.stockId) loadStock(S.stockId,{skipAI:false});}
+  });
   window.addEventListener("beforeunload",()=>{S.intervals.forEach(id=>clearInterval(id));cleanupCharts();});
   window.addEventListener("resize",()=>drawMiniChart());
 
