@@ -1649,7 +1649,7 @@ async function loadStock(id,opts={}){
     const [histR,liveR,chipR,marginR]=await Promise.allSettled([
       fetchHistory(id),fetchTWSELive(id),fetchInstitutional(id),fetchMargin(id)
     ]);
-    if(token!==S.loadToken) return;
+    if(token!==S.loadToken){setLoader(false);return;}
 
     if(histR.status!=="fulfilled") throw histR.reason||new Error("歷史資料失敗");
     const history=histR.value;
@@ -1918,7 +1918,7 @@ function bindEvents(){
     if(tag==="INPUT"||tag==="SELECT"||tag==="TEXTAREA") return;
     if(e.key==="/"||e.key==="f"){e.preventDefault();const s=$("search");if(s){s.focus();s.select();}}
     if(e.key==="Escape") closeSettings();
-    if(e.key==="r"||e.key==="R"){e.preventDefault();if(S.stockId) loadStock(S.stockId,{skipAI:false});}
+    if((e.key==="r"||e.key==="R")&&!S._loading){e.preventDefault();if(S.stockId) loadStock(S.stockId,{skipAI:false});}
   });
   window.addEventListener("beforeunload",()=>{S.intervals.forEach(id=>clearInterval(id));cleanupCharts();});
   window.addEventListener("resize",()=>drawMiniChart());
