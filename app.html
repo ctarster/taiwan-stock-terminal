@@ -1775,7 +1775,7 @@ function startRealtime(){
         renderLiveQuoteBoard();
         checkAlerts(live.price);
         setFetchStatus("ok");
-        if(isTradingHour()){injectLiveQuote();applyTimeframe(false);}
+        if(isTradingHour()){injectLiveQuote();applyTimeframe(false, 'tick');}
       } else {
         // 非交易時段 TWSE 無資料屬正常，僅交易時段才顯示錯誤
         setFetchStatus(isTradingHour()?"err":"ok");
