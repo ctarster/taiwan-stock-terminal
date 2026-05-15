@@ -1762,11 +1762,16 @@ async function fetchInstitutional(id){
     const rows=json.data.sort((a,b)=>a.date.localeCompare(b.date));
     const lastDate=rows[rows.length-1].date;
     const last=rows.filter(x=>x.date===lastDate);
-     // 加總同類別所有行（自營商有「自行買賣」+「避險」兩行）
-    const sum=kws=>last.filter(x=>kws.some(k=>String(x.name||x.Name||"").includes(k))).reduce((a,x)=>a+normNet(x),0);
-    const foreign=sum(["外資及陸資","外資","Foreign"]);
-    const trust=sum(["投信","Investment Trust"]);
-    const dealer=sum(["自營商","Dealer"]);
+      /* 正規化匹配：消除 FinMind 用底線（Investment_Trust）vs 我們用空格（Investment Trust）的不一致。
+       同時把全部字串轉小寫、移除底線/空格/連字號，做寬鬆 substring 比對。 */
+    const norm = s => String(s||"").toLowerCase().replace(/[\s_\-]+/g,"");
+    const matchAny = (x,kws)=>{ const n=norm(x.name||x.Name); return kws.some(k=>n.includes(norm(k))); };
+    /* 排他規則：FinMind 偶有 Foreign_Dealer_Self 之類交叉分類，避免同一行被外資/自營商兩邊重複加總 */
+    const foreign = last.filter(x=>matchAny(x,["Foreign_Investor","外資及陸資","外資"]) && !matchAny(x,["Dealer","自營"])).reduce((a,x)=>a+normNet(x),0);
+    const trust   = last.filter(x=>matchAny(x,["Investment_Trust","投信","Trust"])).reduce((a,x)=>a+normNet(x),0);
+    const dealer  = last.filter(x=>matchAny(x,["Dealer","自營商"])               && !matchAny(x,["Foreign","外資"])).reduce((a,x)=>a+normNet(x),0);
+    // 診斷日誌：列出 FinMind 實際回傳的所有 name 分類，便於日後排查
+    try{ console.log("[QDP][chips]", lastDate, "names=", [...new Set(last.map(x=>x.name||x.Name))], "→ F/T/D=", foreign, trust, dealer); }catch{}
     if(foreign===0&&trust===0&&dealer===0) return null; // 全0視為無資料
     return {date:lastDate,foreign,trust,dealer,total:foreign+trust+dealer};
   }catch{return null;}
