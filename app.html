@@ -422,7 +422,10 @@ button,input,select{font:inherit}
         <div class="sec">
           <div class="sec-head">
             <span class="sec-title c-purple">模型歷史驗證</span>
-            <span class="sec-badge t-purple" id="archive-badge">0筆</span>
+            <div style="display:flex;gap:4px;align-items:center">
+              <button class="tb-btn" id="clearArchiveBtn" style="font-size:8px;padding:2px 6px;color:var(--txt2)">清除</button>
+              <span class="sec-badge t-purple" id="archive-badge">0筆</span>
+            </div>
           </div>
           <div class="sec-body">
             <div class="g2">
@@ -668,6 +671,10 @@ const FACTOR_LABELS={
 
 /* ─── 工具 ─── */
 const $ = id => document.getElementById(id);
+/* null-safe setters — 機構級防禦：element 不存在時靜默跳過，不拋 TypeError */
+const $t = (id,v) => { const e=document.getElementById(id); if(e) e.textContent=v; return e; };
+const $st = (id,prop,v) => { const e=document.getElementById(id); if(e) e.style[prop]=v; };
+const $cls = (id,c) => { const e=document.getElementById(id); if(e) e.className=c; };
 const sn = (v,fb=0) => { const n=Number(v); return Number.isFinite(n)?n:fb; };
 const fp = v => Number.isFinite(+v) ? (+v).toFixed(2) : "---";
 const fc = v => Number.isFinite(+v) ? ((+v>=0?"+":"")+((+v).toFixed(2))) : "---";
@@ -1582,12 +1589,10 @@ function renderOhlc(){
   $("fDIF").textContent=fp(r.dif);$("fDEA").textContent=fp(r.dea);$("fHist").textContent=fp(r.hist);
   $("fK").textContent=fp(r.k);$("fD").textContent=fp(r.d);$("fJ").textContent=fp(r.j);
   if($("fVWAP"))$("fVWAP").textContent=fp(r.vwap);
-  const rsiEl=$("fRSI");
-  rsiEl.style.color=r.rsi>70?"var(--red)":r.rsi<30?"var(--green)":"var(--txt0)";
-  const histEl=$("fHist");
-  histEl.style.color=r.hist>=0?"var(--red)":"var(--green)";
-  const jEl=$("fJ");
-  jEl.style.color=r.j>80?"var(--red)":r.j<20?"var(--green)":"var(--txt0)";
+  
+  $st("fRSI","color",r.rsi>70?"var(--red)":r.rsi<30?"var(--green)":"var(--txt0)");
+  $st("fHist","color",r.hist>=0?"var(--red)":"var(--green)");
+  $st("fJ","color",r.j>80?"var(--red)":r.j<20?"var(--green)":"var(--txt0)");
   // Pivot Points 摘要更新
   const pv=calcPivots(S.enriched);
   if(pv&&$("pivot-summary")){
