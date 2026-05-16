@@ -404,13 +404,14 @@ button,input,select{font:inherit}
         <!-- 風險管理 -->
         <div class="sec">
           <div class="sec-head">
-            <span class="sec-title c-green">風險 / Kelly 倉位</span>
+            <span class="sec-title c-green">風險 / 部位管理</span>
             <span class="sec-badge t-neutral" id="risk-badge">—</span>
           </div>
           <div class="sec-body">
             <div class="g2">
-              <div class="box"><div class="lbl">Kelly 倉位</div><div class="val" id="kellyPct">---</div><div class="sub">上限25% 半Kelly</div></div>
-              <div class="box"><div class="lbl">ATR 停損參考</div><div class="val c-green" id="atrStop">---</div><div class="sub">現價 − 1.5×ATR</div></div>
+              <div class="box"><div class="lbl">建議張數</div><div class="val c-blue" id="sizingLots">---</div><div class="sub" id="sizingSub">依 ATR + 風險預算</div></div>
+              <div class="box"><div class="lbl">最大可虧</div><div class="val c-red" id="sizingMaxLoss">---</div><div class="sub">單筆風險預算</div></div>
+              <div class="box"><div class="lbl">ATR 停損</div><div class="val c-green" id="atrStop">---</div><div class="sub">現價 − 1.5×ATR</div></div>
               <div class="box"><div class="lbl">最大回撤</div><div class="val" id="maxDD">---</div></div>
               <div class="box"><div class="lbl">年化波動</div><div class="val" id="annVol">---</div></div>
               <div class="box"><div class="lbl">風險評分</div><div class="val" id="riskScore">---</div></div>
@@ -621,6 +622,23 @@ button,input,select{font:inherit}
           </select>
         </div>
       </div>
+      <div class="fg" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px">
+        <div>
+          <label>帳戶總資金（NT$）</label>
+          <input id="capital" type="number" min="10000" step="10000" placeholder="1000000" style="width:100%">
+          <div class="hint">用於計算單筆建議張數</div>
+        </div>
+        <div>
+          <label>單筆風險（%）</label>
+          <select id="riskPct">
+            <option value="0.5">0.5%（極保守）</option>
+            <option value="1" selected>1%（機構標準）</option>
+            <option value="2">2%（積極）</option>
+            <option value="3">3%（激進）</option>
+          </select>
+          <div class="hint">最大可承受虧損 = 資金 × 此比例</div>
+        </div>
+      </div>
     </div>
     <div class="sp-footer">
       <button class="tb-btn primary" style="flex:1" id="saveCfgBtn">儲存設定</button>
@@ -658,16 +676,25 @@ const KNOWN = {
   "2379":"瑞昱","5483":"中美晶","3714":"兆利","2345":"智邦","6669":"緯穎"
 };
 const STORE = { cfg:"qdp31_cfg", watch:"qdp31_watch", alerts:"qdp31_alerts", pred:"qdp31_pred" };
+/* BASE_W — 多因子初始權重（會被 adaptiveWeights 動態校準）
+ *   v3.3 新增：
+ *     relStr      — 個股 vs 加權指數 N 日相對報酬（避免吃落後股）
+ *     chipStreak  — 三大法人連續同向買賣天數（單日雜訊太大，連續才有意義）
+ *   原 revenue/eps 保留結構（將來接 FinMind 月營收 / 財報資料源）
+ *   權重總和 ≈ 1.00（adaptiveWeights 會強制正規化）
+ */
 const BASE_W={
-  rsi:.08, macd:.10, kdj:.06, bb:.06, vol:.07, ma:.09, chip:.08, margin:.05,
-  adx:.07, obv:.07, stochRsi:.06, mfi:.06, mom20:.05, vwapDev:.05,
-  revenue:.05, eps:.05
+  rsi:.07, macd:.09, kdj:.05, bb:.05, vol:.06, ma:.08, chip:.06, margin:.04,
+  adx:.06, obv:.06, stochRsi:.05, mfi:.05, mom20:.05, vwapDev:.05,
+  revenue:.03, eps:.03,
+  relStr:.09, chipStreak:.08   // 新增：相對強度（高）+ 籌碼連續同向
 };
 const FACTOR_LABELS={
   rsi:"RSI動能",     macd:"MACD趨勢",    kdj:"KDJ震盪",    bb:"布林位置",
   vol:"量價能量",    ma:"均線結構",      chip:"三大法人",  margin:"融資融券",
   adx:"ADX趨勢力",  obv:"OBV能量",      stochRsi:"隨機RSI", mfi:"資金流向",
-  mom20:"20日動能",  vwapDev:"VWAP偏離", revenue:"月營收",  eps:"EPS趨勢"
+  mom20:"20日動能",  vwapDev:"VWAP偏離", revenue:"月營收",  eps:"EPS趨勢",
+  relStr:"大盤相對強度", chipStreak:"法人連續同向"
 };
 
 /* ─── 工具 ─── */
@@ -756,8 +783,9 @@ const S = {
 
 /* ─── 設定 ─── */
 function loadCfg(){
-  try{ return Object.assign({finmindToken:"",groqKey:"",btBars:180,rtSec:15},JSON.parse(localStorage.getItem(STORE.cfg))||{}); }
-  catch{ return {finmindToken:"",groqKey:"",btBars:180,rtSec:15}; }
+  const def={finmindToken:"",groqKey:"",btBars:180,rtSec:15,capital:1000000,riskPct:1};
+  try{ return Object.assign(def,JSON.parse(localStorage.getItem(STORE.cfg))||{}); }
+  catch{ return def; }
 }
 function saveCfgObj(cfg){ localStorage.setItem(STORE.cfg,JSON.stringify(cfg)); }
 function getWatchlist(){
@@ -1359,6 +1387,22 @@ function factorSignalsAt(rows,i,ext={}){
   // 月營收 / EPS：外部資料，無資料時中性
   sig.revenue=clamp(sn(ext.revenueGrowth,0),-1,1);
   sig.eps=clamp(sn(ext.epsGrowth,0),-1,1);
+   /* relStr — 個股相對加權指數的 5 日報酬差。
+     ext.relReturn5 已是「個股 - 大盤」百分點（如 +0.02 = 領先 2%）。
+     ±3% 對應 ±0.9 訊號；領先大盤明顯則加強多方訊號。 */
+  sig.relStr=clamp(sn(ext.relReturn5,0)*30,-1,1);
+
+  /* chipStreak — 三大法人連續同向買賣天數
+     ext.foreignStreak / trustStreak / dealerStreak：正數 = 連 N 日買；負數 = 連 N 日賣
+     取絕對值最大者（投信權重略低 0.8，自營商更低 0.6 — 因為自營含避險，方向意義較弱）
+     連 5 日同向 = 滿分。 */
+  const fStr=sn(ext.foreignStreak,0);
+  const tStr=sn(ext.trustStreak,0)*0.8;
+  const dStr=sn(ext.dealerStreak,0)*0.6;
+  let maxStr=fStr;
+  if(Math.abs(tStr)>Math.abs(maxStr)) maxStr=tStr;
+  if(Math.abs(dStr)>Math.abs(maxStr)) maxStr=dStr;
+  sig.chipStreak=clamp(maxStr/5,-1,1);
   return sig;
 }
 /* adaptiveWeights — 機構級因子權重校準
@@ -1639,6 +1683,61 @@ async function fetchHistory(id){
   })).sort((a,b)=>a.time.localeCompare(b.time));
 }
 
+/* fetchTWII — 加權指數歷史，用於計算個股相對強度
+ *   FinMind 提供 TAIEX（加權指數）走勢資料。
+ *   快取策略：localStorage 存最新 60 日，當日內不再重抓（每天首次載入更新）。 */
+const TWII_CACHE_KEY="qdp33_twii_cache";
+async function fetchTWII(){
+  // 嘗試讀快取
+  try{
+    const cached=JSON.parse(localStorage.getItem(TWII_CACHE_KEY)||"null");
+    if(cached && cached.date===dateKey(new Date()) && Array.isArray(cached.rows) && cached.rows.length>=20){
+      return cached.rows;
+    }
+  }catch{}
+  // 抓 90 日（足夠算 5 日相對報酬與緩衝）
+  const start=new Date();start.setDate(start.getDate()-90);
+  const tryDatasets=[
+    {ds:"TaiwanStockPrice",          data_id:"TAIEX"},   // 主要嘗試
+    {ds:"TaiwanVariousIndicators5Seconds", data_id:"TAIEX"},  // 備援
+  ];
+  for(const t of tryDatasets){
+    try{
+      const url=fmUrl(t.ds,{data_id:t.data_id,start_date:dateKey(start)});
+      const res=await fetchRetry(url,{},10000,1);
+      if(!res?.ok) continue;
+      const json=await res.json();
+      if(json.msg!=="success"||!json.data?.length) continue;
+      const rows=json.data.map(d=>({time:d.date,close:sn(d.close||d.price||d.Close)}))
+                          .filter(r=>r.time&&Number.isFinite(r.close)&&r.close>0)
+                          .sort((a,b)=>a.time.localeCompare(b.time));
+      if(rows.length<10) continue;
+      try{ localStorage.setItem(TWII_CACHE_KEY,JSON.stringify({date:dateKey(new Date()),rows})); }catch{}
+      console.log(`[QDP][TWII] loaded ${rows.length} bars via ${t.ds}`);
+      return rows;
+    }catch(e){ /* 試下一個 */ }
+  }
+  console.warn("[QDP][TWII] all datasets failed; relStr factor will default to neutral");
+  return null;
+}
+/* relReturn5 — 計算個股 vs 大盤的 5 日報酬差（小數，如 0.02 = 領先 2%） */
+function calcRelReturn(stockRows, twiiRows, lookback=5){
+  if(!stockRows?.length || !twiiRows?.length || stockRows.length<lookback+1) return 0;
+  const lastStock=stockRows[stockRows.length-1];
+  const pastStock=stockRows[stockRows.length-1-lookback];
+  if(!lastStock?.close||!pastStock?.close) return 0;
+  const sRet=(lastStock.close-pastStock.close)/pastStock.close;
+  // 對齊大盤：取截至個股最後日的最近 N+1 筆
+  const lastDate=lastStock.time;
+  const idxT=twiiRows.findIndex(r=>r.time>lastDate);
+  const endT=idxT<0?twiiRows.length:idxT;
+  if(endT<lookback+1) return 0;
+  const tLast=twiiRows[endT-1].close;
+  const tPast=twiiRows[endT-1-lookback].close;
+  if(!tLast||!tPast) return 0;
+  const tRet=(tLast-tPast)/tPast;
+  return sRet-tRet;
+}
 /* ── CORS Proxy 健康池：評分輪換 + 舊資料快取保底 ──
  *   首選：自架 Cloudflare Worker（< 100ms、99.99% SLA、edge cache 3s）
  *   備援：4 個公用 proxy（Worker 異常時自動降級，不影響可用性）
@@ -1760,20 +1859,50 @@ async function fetchInstitutional(id){
     const json=await res.json();
     if(json.msg!=="success"||!json.data?.length) return null;
     const rows=json.data.sort((a,b)=>a.date.localeCompare(b.date));
-    const lastDate=rows[rows.length-1].date;
-    const last=rows.filter(x=>x.date===lastDate);
-      /* 正規化匹配：消除 FinMind 用底線（Investment_Trust）vs 我們用空格（Investment Trust）的不一致。
-       同時把全部字串轉小寫、移除底線/空格/連字號，做寬鬆 substring 比對。 */
+     /* 正規化匹配：消除 FinMind 用底線（Investment_Trust）vs 我們用空格（Investment Trust）的不一致。 */
     const norm = s => String(s||"").toLowerCase().replace(/[\s_\-]+/g,"");
     const matchAny = (x,kws)=>{ const n=norm(x.name||x.Name); return kws.some(k=>n.includes(norm(k))); };
-    /* 排他規則：FinMind 偶有 Foreign_Dealer_Self 之類交叉分類，避免同一行被外資/自營商兩邊重複加總 */
-    const foreign = last.filter(x=>matchAny(x,["Foreign_Investor","外資及陸資","外資"]) && !matchAny(x,["Dealer","自營"])).reduce((a,x)=>a+normNet(x),0);
-    const trust   = last.filter(x=>matchAny(x,["Investment_Trust","投信","Trust"])).reduce((a,x)=>a+normNet(x),0);
-    const dealer  = last.filter(x=>matchAny(x,["Dealer","自營商"])               && !matchAny(x,["Foreign","外資"])).reduce((a,x)=>a+normNet(x),0);
-    // 診斷日誌：列出 FinMind 實際回傳的所有 name 分類，便於日後排查
-    try{ console.log("[QDP][chips]", lastDate, "names=", [...new Set(last.map(x=>x.name||x.Name))], "→ F/T/D=", foreign, trust, dealer); }catch{}
-    if(foreign===0&&trust===0&&dealer===0) return null; // 全0視為無資料
-    return {date:lastDate,foreign,trust,dealer,total:foreign+trust+dealer};
+    const isForeign = x => matchAny(x,["Foreign_Investor","外資及陸資","外資"]) && !matchAny(x,["Dealer","自營"]);
+    const isTrust   = x => matchAny(x,["Investment_Trust","投信","Trust"]);
+    const isDealer  = x => matchAny(x,["Dealer","自營商"])               && !matchAny(x,["Foreign","外資"]);
+
+    // ── 取得每日淨買賣（依日期 groupby）──
+    const byDate = new Map();
+    rows.forEach(r=>{
+      if(!byDate.has(r.date)) byDate.set(r.date,{F:0,T:0,D:0});
+      const acc=byDate.get(r.date);
+      if(isForeign(r))      acc.F+=normNet(r);
+      else if(isTrust(r))   acc.T+=normNet(r);
+      else if(isDealer(r))  acc.D+=normNet(r);
+    });
+    const dates=[...byDate.keys()].sort();
+    if(!dates.length) return null;
+    const lastDate=dates[dates.length-1];
+    const lastDay=byDate.get(lastDate);
+
+    /* 計算連續同向天數：從最新一天回溯，遇到反向或零則中斷。
+       例如外資連買 5 日 → streak=+5；連賣 3 日 → streak=-3；最新一天為零 → streak=0。 */
+    const calcStreak=key=>{
+      const today=byDate.get(lastDate)[key];
+      if(today===0) return 0;
+      const dir=Math.sign(today);
+      let count=0;
+      for(let i=dates.length-1;i>=0;i--){
+        const v=byDate.get(dates[i])[key];
+        if(Math.sign(v)===dir && v!==0) count++;
+        else break;
+      }
+      return dir*count;
+    };
+    const foreignStreak=calcStreak("F");
+    const trustStreak  =calcStreak("T");
+    const dealerStreak =calcStreak("D");
+
+    const foreign=lastDay.F, trust=lastDay.T, dealer=lastDay.D;
+    try{ console.log(`[QDP][chips] ${lastDate} F=${foreign}(連${foreignStreak}) T=${trust}(連${trustStreak}) D=${dealer}(連${dealerStreak})`); }catch{}
+    if(foreign===0&&trust===0&&dealer===0&&!foreignStreak&&!trustStreak&&!dealerStreak) return null;
+    return {date:lastDate,foreign,trust,dealer,total:foreign+trust+dealer,
+            foreignStreak,trustStreak,dealerStreak};
   }catch{return null;}
 }
 async function fetchMargin(id){
@@ -1975,10 +2104,19 @@ function renderChips(){
   if(m) lines.push(`融資${m.marginDelta>=0?"增":"減"} ${fv(Math.abs(m.marginDelta))} 張，券資比 ${m.shortRatio.toFixed(2)}%。`);
   $("chip-summary").textContent=lines.join(" ")||"尚無籌碼資料。";
 }
-
+/* renderRisk — 機構級風險與部位管理
+ *   核心：Fixed Fractional + ATR Position Sizing（取代 Kelly）
+ *   公式：
+ *     單筆風險預算 = 帳戶總資金 × 風險%
+ *     停損距離（每股）= 1.5 × ATR
+ *     建議股數 = 風險預算 ÷ 停損距離
+ *     建議張數 = floor(建議股數 ÷ 1000)
+ *     實際最大可虧 = 建議張數 × 1000 × 停損距離
+ *   信心調整：模型訊號越強（|score| 大、信心高），可放大 1.0-1.3 倍倉位
+ */
 function renderRisk(){
   const rows=S.enriched;if(!rows.length) return;
-  const av=annVol(rows),bt=S.backtest,mdd=bt?bt.maxDD:0,kelly=bt?bt.kelly:0;
+  const av=annVol(rows),bt=S.backtest,mdd=bt?bt.maxDD:0;
   let score=50;
   score+=av>.45?18:av>.30?8:-6;
   score+=mdd>.30?16:mdd>.20?8:-4;
@@ -1987,15 +2125,44 @@ function renderRisk(){
   const lastRow=rows[rows.length-1];
   const sp=S.liveQuote?.price||sn(lastRow.close);
   const atrVal=sn(lastRow.atr,sp*0.02)||sp*0.02;
-  $("atrStop").textContent=fp(sp-1.5*atrVal);
-  $("maxDD").textContent=(mdd*100).toFixed(1)+"%";
-  $("annVol").textContent=(av*100).toFixed(1)+"%";
-  $("riskScore").textContent=score.toFixed(0);
-  const badge=$("risk-badge");
-  if(score>=70){badge.className="sec-badge t-red";badge.textContent="高風險";}
-  else if(score>=50){badge.className="sec-badge t-yellow";badge.textContent="中等";}
-  else{badge.className="sec-badge t-green";badge.textContent="正常";}
-  $("risk-text").textContent=`年化波動 ${(av*100).toFixed(1)}%、最大回撤 ${(mdd*100).toFixed(1)}%。現貨停損參考：${fp(sp-1.5*atrVal)}（現價 − 1.5×ATR）。`; 
+  const stopDist=1.5*atrVal;                                    // 每股停損距離 (NT$)
+  const stopPrice=sp-stopDist;
+
+  // ── ATR Position Sizing ──
+  const cfg=loadCfg();
+  const capital=Math.max(10000,sn(cfg.capital,1000000));
+  const riskPct=clamp(sn(cfg.riskPct,1),0.1,10)/100;
+  const riskBudget=capital*riskPct;                             // NT$
+  // 信心倍率：score 偏多且信心 > 60% 時放大、低信心或方向中性時縮小
+  let confMult=1.0;
+  if(S.pred){
+    const absS=Math.abs(S.pred.score),conf=S.pred.confidence/100;
+    if(absS>0.15&&conf>0.6) confMult=1.0+Math.min(0.3,(absS-0.15)*1.5);  // 最多放大到 1.3
+    else if(absS<0.05||conf<0.4) confMult=0.6;                            // 低訊號縮減倉位
+  }
+  const effectiveRiskBudget=riskBudget*confMult;
+  const sharesRaw = stopDist>0 ? effectiveRiskBudget/stopDist : 0;
+  const lots = Math.max(0, Math.floor(sharesRaw/1000));         // 整張
+  const actualMaxLoss = lots*1000*stopDist;                     // 實際最大可虧 NT$
+
+  $t("sizingLots", lots>0 ? lots+" 張" : "倉位不足");
+  $t("sizingMaxLoss", lots>0 ? "NT$ "+Math.round(actualMaxLoss).toLocaleString() : "—");
+  $t("sizingSub", `風險 ${(riskPct*100).toFixed(1)}% × ${confMult.toFixed(2)}x 信心`);
+
+  $t("atrStop",fp(stopPrice));
+  $t("maxDD",(mdd*100).toFixed(1)+"%");
+  $t("annVol",(av*100).toFixed(1)+"%");
+  $t("riskScore",score.toFixed(0));
+  const badge=$.real("risk-badge");
+  if(badge){
+    if(score>=70){badge.className="sec-badge t-red";badge.textContent="高風險";}
+    else if(score>=50){badge.className="sec-badge t-yellow";badge.textContent="中等";}
+    else{badge.className="sec-badge t-green";badge.textContent="正常";}
+  }
+  $t("risk-text",
+    `部位建議：${lots} 張（信心係數 ${confMult.toFixed(2)}x），進場 ${fp(sp)}、停損 ${fp(stopPrice)}（距離 ${fp(stopDist)}），實際最大可虧 NT$ ${Math.round(actualMaxLoss).toLocaleString()}。`+
+    `\n年化波動 ${(av*100).toFixed(1)}%、最大回撤 ${(mdd*100).toFixed(1)}%。`
+  );
 }
 function annVol(rows){
   if(rows.length<30) return 0;
@@ -2191,7 +2358,7 @@ async function loadStock(id,opts={}){
     renderChips();
     setLoader(false);
     setFetchStatus("ok");
-    appendLog(`載入完成：歷史${history.length}筆，籌碼${S.chips?"✓":"✗"}，融資${S.margin?"✓":"✗"}，即時${live?"✓":"✗"}`);
+    appendLog(`載入完成：歷史${history.length}筆，籌碼${S.chips?"✓":"✗"}，融資${S.margin?"✓":"✗"}，即時${live?"✓":"✗"}，大盤${S.twiiRows?"✓":"✗"}`);
     if(!opts.skipAI) refreshAI();
   }catch(e){
     setLoader(false);
@@ -2218,6 +2385,66 @@ function updateChartLastBar(){
   try{S.series.dif.update({time:r.time,value:sn(r.dif)});S.series.dea.update({time:r.time,value:sn(r.dea)});}catch{}
   try{S.series.hist.update({time:r.time,value:sn(r.hist),color:r.hist>=0?"rgba(255,68,68,.6)":"rgba(0,204,136,.6)"});}catch{}
   try{S.series.k.update({time:r.time,value:sn(r.k)});S.series.d.update({time:r.time,value:sn(r.d)});S.series.j.update({time:r.time,value:sn(r.j)});}catch{}
+}
+/* computeConfluence — 多時框 D+W 訊號融合（機構級確認機制）
+ *   邏輯：個股若僅在日線多但週線空，往往是反彈不是反轉；雙時框同向才信。
+ *   產出：
+ *     scoreD / scoreW — 兩個時框各自的多因子分數
+ *     aligned — 是否方向一致且強度足夠（|score| > 0.05）
+ *     direction — "多" / "空" / "分歧"
+ *     strength — min(|D|,|W|) — 取較弱者代表共識強度
+ *   快取：rawRows 長度 + 末根時間沒變就用快取（盤中 tick 不重算）
+ */
+function computeConfluence(){
+  if(!S.rawRows.length || S.rawRows.length<50) return null;
+  const ckey=`${S.stockId}|${S.rawRows.length}|${S.rawRows[S.rawRows.length-1]?.time||""}`;
+  if(S._confluenceCache && S._confluenceCache.key===ckey) return S._confluenceCache.val;
+
+  const ext={
+    chipNet:S.chips?S.chips.total:0,
+    marginDelta:S.margin?S.margin.marginDelta:0,
+    shortRatio:S.margin?S.margin.shortRatio:0,
+    foreignStreak:S.chips?.foreignStreak||0,
+    trustStreak  :S.chips?.trustStreak||0,
+    dealerStreak :S.chips?.dealerStreak||0
+  };
+  let scoreD=NaN,scoreW=NaN;
+  try{
+    // D 時框
+    let dEnr;
+    const dKey=`D|${S.rawRows.length}|${S.rawRows[S.rawRows.length-1]?.time}`;
+    if(S.timeframe==="D" && S.enriched.length) dEnr=S.enriched;
+    else if(S.enrichCache.has(dKey)) dEnr=S.enrichCache.get(dKey).enriched;
+    else { dEnr=enrichRows(aggregateRows(S.rawRows,"D")); }
+    if(dEnr.length){
+      ext.relReturn5=calcRelReturn(dEnr,S.twiiRows,5);
+      const dPred=predictNext(dEnr, S.liveQuote?.price||dEnr[dEnr.length-1].close, ext);
+      if(dPred) scoreD=dPred.score;
+    }
+    // W 時框
+    let wEnr;
+    if(S.timeframe==="W" && S.enriched.length) wEnr=S.enriched;
+    else { wEnr=enrichRows(aggregateRows(S.rawRows,"W")); }
+    if(wEnr.length){
+      const wPred=predictNext(wEnr, S.liveQuote?.price||wEnr[wEnr.length-1].close, ext);
+      if(wPred) scoreW=wPred.score;
+    }
+  }catch(e){ console.warn("[QDP][confluence]",e); }
+
+  if(!Number.isFinite(scoreD)||!Number.isFinite(scoreW)){
+    const val={scoreD,scoreW,aligned:false,direction:"資料不足",strength:0};
+    S._confluenceCache={key:ckey,val};
+    return val;
+  }
+  const dSign=Math.sign(scoreD),wSign=Math.sign(scoreW);
+  const aligned = dSign===wSign && dSign!==0 && Math.abs(scoreD)>0.05 && Math.abs(scoreW)>0.05;
+  let direction="分歧";
+  if(aligned) direction = dSign>0 ? "雙多" : "雙空";
+  else if(Math.abs(scoreD)<0.05 && Math.abs(scoreW)<0.05) direction="雙中性";
+  const strength = aligned ? Math.min(Math.abs(scoreD),Math.abs(scoreW)) : 0;
+  const val={scoreD,scoreW,aligned,direction,strength};
+  S._confluenceCache={key:ckey,val};
+  return val;
 }
 
 /* applyTimeframe — 機構級熱路徑
@@ -2688,9 +2915,11 @@ async function runSelftest(silent=false){
     "fATR","fRSI","fBB","fDIF","fDEA","fHist","fK","fD","fJ",
     "pred-badge","pOpen","pClose","pTp1","pTp2","pSl","pConf","prob-text","lastScore",
     "chipForeign","chipTrust","chipDealer","chipTotal","chipDate","marginBal","marginChg","shortBal","shortRatio","chip-summary",
-    "atrStop","maxDD","annVol","riskScore","risk-text","risk-badge",
+    "atrStop","maxDD","annVol","riskScore","risk-text","risk-badge","sizingLots","sizingMaxLoss","sizingSub",
+    "confluence-badge","confluence-detail",
     "archive-badge","hitRate","avgErr","verifiedN","archive-text",
-    "btReturn","btWin","btPF","btSharpe","bt-badge","bt-text","kellyPct",
+    "btReturn","btWin","btPF","btSharpe","bt-badge","bt-text",
+    "capital","riskPct",
     "ai-body","ai-badge",
     "search","searchBtn","watchBtn","exportBtn",
     "alertType","alertPrice","addAlertBtn","alertsList","alert-badge",
@@ -2745,14 +2974,14 @@ window.QDP={
   selftest:runSelftest,
   state:()=>S,
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;toast("快取已清","ok");},
-  version:"3.2-institutional"
+  version:"3.3-institutional-mtf"   // multi-timeframe + ATR sizing + 大盤相對強度 + 法人連續同向
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.2 初始化完成（institutional-grade）。");
+    appendLog("QDP PRO v3.3 初始化完成（institutional-grade + 多時框 + ATR sizing + 大盤相對強度）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
