@@ -1496,9 +1496,12 @@ function runBacktest(rows,targetBars=180){
   const TAX     =0.003;
   const COST    =BUY_FEE+SELL_FEE+TAX;
 
-  // 波段參數
-  const TP_MULT =2.0;   // 止盈 ATR 倍數
-  const SL_MULT =1.2;   // 止損 ATR 倍數
+   /* ── 機構級波段參數（v3.3 對齊 predictNext） ──
+   *  R:R = 1:2 — 統一停損 / 止盈倍數，避免 backtest 與 predict 不一致。
+   *  進場過濾兩道：(1) 多因子分數 > 門檻 (2) 多頭趨勢結構（MA5>MA20 且 MA20>MA60）
+   *  反向訊號 < -0.05 提前出場；持倉超時 20 根強制平倉。 */
+  const TP_MULT =3.0;   // 止盈 ATR 倍數（與 predictNext.tp2 對齊）
+  const SL_MULT =1.5;   // 止損 ATR 倍數（與 predictNext.sl 對齊；給噪音空間）
   const MAX_HOLD=20;    // 最大持倉K棒數
   const ENTRY_TH=0.08;  // 買入訊號門檻
   const EXIT_TH =-0.05; // 賣出訊號門檻
@@ -1525,9 +1528,16 @@ function runBacktest(rows,targetBars=180){
       }
     }
 
+     /* ── 趨勢結構過濾 ── 機構紀律：只在多頭排列時做多。
+     *   條件：MA5 > MA20 AND MA20 > MA60（短中長線同向上）。
+     *   過濾掉「反彈但仍是空頭結構」的假訊號，是提升勝率最有效的單一改進。 */
+    const ma5=sn(cur.ma5),ma20=sn(cur.ma20),ma60=sn(cur.ma60);
+    const trendUp = Number.isFinite(ma5) && Number.isFinite(ma20) && Number.isFinite(ma60) && ma5>ma20 && ma20>ma60;
+
     if(state==='FLAT'){
-      // 多方進場：下一根開盤買入
+      // 多方進場：訊號強 + 趨勢確認 + 下一根開盤買入
       if(score>ENTRY_TH && i<rows.length-1){
+        if(!trendUp){ filteredByTrend++; curve.push(equity); continue; }
         const nxt=rows[i+1];
         if(!nxt?.open){curve.push(equity);continue;}
         entryPrice=nxt.open;
@@ -3084,7 +3094,7 @@ window.QDP={
   selftest:runSelftest,
   state:()=>S,
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
-  version:"3.3-institutional-mtf"   // multi-timeframe + ATR sizing + 大盤相對強度 + 法人連續同向
+  version:"3.4-institutional-rr2"   // R:R 1:2 + 趨勢過濾 + sigmoid 信心 + 多時框 + ATR sizing + relStr + chipStreak
 };
 
 async function init(){
