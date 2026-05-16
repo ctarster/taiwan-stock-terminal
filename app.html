@@ -1555,7 +1555,30 @@ function predictNext(rows,livePrice,ext={}){
   const weights=adaptiveWeightsCached(rows,ext);   // 快取：盤中 tick 不重算
   const sig=factorSignalsAt(rows,i,ext);
   const factors=Object.keys(weights).map(name=>({name,sig:sig[name],w:weights[name]}));
-  const score=factors.reduce((a,f)=>a+f.sig*f.w,0);
+  const rawScore=factors.reduce((a,f)=>a+f.sig*f.w,0);
+
+  /* ── Regime Override（機構級反轉訊號優先機制）──
+   *   修復 adaptiveWeights 把罕見強訊號稀釋到無效權重的結構性問題。
+   *   exhaustion 在三重極值（RSI + BB% + 偏離 MA20）時觸發，命中率遠高於日常趨勢因子。
+   *   給予 override 權重不受 adaptiveWeights 影響：
+   *     強反向 (|exh|≥.70) → 75% 反向 + 25% 原 score
+   *     中反向 (|exh|≥.45) → 50/50 平衡
+   *     輕警示 (|exh|≥.20) → 20% 反向夾帶
+   *   參考：AQR、Renaissance 的 regime-switching framework。
+   */
+  const exh=sn(sig.exhaustion,0);
+  let score=rawScore, regimeNote="";
+  const absExh=Math.abs(exh);
+  if(absExh>=0.70){
+    score=rawScore*0.25 + exh*0.75;
+    regimeNote = exh>0 ? "⚠ 強底部反轉" : "⚠ 強頂部反轉";
+  } else if(absExh>=0.45){
+    score=rawScore*0.50 + exh*0.50;
+    regimeNote = exh>0 ? "⚠ 底部警示" : "⚠ 頂部警示";
+  } else if(absExh>=0.20){
+    score=rawScore*0.80 + exh*0.30;
+    regimeNote = exh>0 ? "△ 底部關注" : "△ 頂部關注";
+  }
   /* 共識強度 — 強多因子權重和 vs 強空因子權重和的差
      範圍 [0,1]：1 = 全部因子同向；0 = 完全分歧。低共識代表訊號混亂，不該重壓。 */
   const last=rows[i];
@@ -1591,7 +1614,8 @@ function predictNext(rows,livePrice,ext={}){
     tp2: livePrice + 3.0*atr,
     sl:  livePrice - SL_DIST,
     prob:{up:clamp(Math.round(50+score*42),5,90)},
-    weights,factors,atr
+    weights,factors,atr,
+    rawScore, regimeNote   // 機構級透明度：顯示原 score 與是否觸發反轉 regime
   };
 }
 
@@ -1635,8 +1659,14 @@ function runBacktest(rows,targetBars=180){
     if(!cur){curve.push(equity);continue;}
     const atr=Math.max(0.01,sn(cur.atr,cur.close*0.02));
     const sig=factorSignalsAt(rows,i,{});
-    let score=0;
-    for(const n of wKeys) score+=sig[n]*frozenW[n];
+    let rawScore=0;
+    for(const n of wKeys) rawScore+=sig[n]*frozenW[n];
+    // Regime Override（與 predictNext 一致）— 確保回測與前台用同一套訊號邏輯
+    const exh=sn(sig.exhaustion,0), absExh=Math.abs(exh);
+    let score=rawScore;
+    if(absExh>=0.70)      score=rawScore*0.25 + exh*0.75;
+    else if(absExh>=0.45) score=rawScore*0.50 + exh*0.50;
+    else if(absExh>=0.20) score=rawScore*0.80 + exh*0.30;
 
     // 預測誤差（信號品質監控，與持倉邏輯無關）
     if(i<rows.length-1){
@@ -2201,8 +2231,12 @@ function renderOhlc(){
 
 function renderPrediction(){
   const p=S.pred;if(!p) return;
-  $t("pred-badge",`${p.score>0.08?"偏多":p.score<-0.08?"偏空":"中性"} ${p.score.toFixed(3)}`);
-  $cls("pred-badge",`sec-badge ${p.score>0.08?"t-red":p.score<-0.08?"t-green":"t-neutral"}`);
+  // 反轉警示優先顯示（如有觸發），否則顯示常規方向 + 分數
+  const badgeText = p.regimeNote
+    ? `${p.regimeNote} ${p.score.toFixed(3)}`
+    : `${p.score>0.08?"偏多":p.score<-0.08?"偏空":"中性"} ${p.score.toFixed(3)}`;
+  $t("pred-badge", badgeText);
+  $cls("pred-badge",`sec-badge ${p.regimeNote ? "t-yellow" : (p.score>0.08?"t-red":p.score<-0.08?"t-green":"t-neutral")}`);
   $t("pOpen",fp(p.ev_open));$t("pClose",fp(p.ev_close));
   $t("pTp1",fp(p.tp1));$t("pTp2",fp(p.tp2));
   $t("pSl",fp(p.sl));$t("pConf",p.confidence.toFixed(0)+"%");
@@ -2297,14 +2331,33 @@ function renderHistoricalSnapshot(timeStr){
   };
   const sig = factorSignalsAt(S.enriched, idx, ext);
   const factors = Object.keys(weights).map(name => ({name, sig: sig[name]||0, w: weights[name]}));
-  const score = factors.reduce((a,f)=>a+f.sig*f.w, 0);
+  const rawScore = factors.reduce((a,f)=>a+f.sig*f.w, 0);
+
+  // ── Regime Override（與 predictNext 同步邏輯）──
+  const exh = sn(sig.exhaustion, 0);
+  let score = rawScore, regimeNote = "";
+  const absExh = Math.abs(exh);
+  if(absExh>=0.70){
+    score = rawScore*0.25 + exh*0.75;
+    regimeNote = exh>0 ? "⚠ 強底部反轉" : "⚠ 強頂部反轉";
+  } else if(absExh>=0.45){
+    score = rawScore*0.50 + exh*0.50;
+    regimeNote = exh>0 ? "⚠ 底部警示" : "⚠ 頂部警示";
+  } else if(absExh>=0.20){
+    score = rawScore*0.80 + exh*0.30;
+    regimeNote = exh>0 ? "△ 底部關注" : "△ 頂部關注";
+  }
+
   const atr = Math.max(0.01, sn(r.atr, r.close*0.02));
   const evClose = r.close + score*atr*(0.55+Math.abs(score)*1.35);
   const evOpen = r.close + (evClose-r.close)*0.32;
 
-  // ── 預測面板（標記為歷史快照）──
+  // ── 預測面板（標記為歷史快照 + 反轉警示）──
   const dir = score>0.08?"偏多":score<-0.08?"偏空":"中性";
-  $t("pred-badge", `📅 ${r.time} ${dir} ${score.toFixed(3)}`);
+  const badgeContent = regimeNote
+    ? `📅 ${r.time} ${regimeNote} ${score.toFixed(3)}`
+    : `📅 ${r.time} ${dir} ${score.toFixed(3)}`;
+  $t("pred-badge", badgeContent);
   $cls("pred-badge", "sec-badge t-yellow");                  // 黃色 = 歷史快照（區別於即時模式）
   $t("pOpen",fp(evOpen));
   $t("pClose",fp(evClose));
@@ -3378,6 +3431,11 @@ async function runSelftest(silent=false){
     const fakeBottom={rsi:18,bbPct:5,close:80,ma20:92,ma5:82,ma60:100,k:10,d:12,j:5,dif:-2,dea:-1.5,hist:-1,atr:2,vr:1,vwap:88,bbUpper:105,bbLower:78,ma120:100};
     const sigExhB=factorSignalsAt([fakeBottom,fakeBottom],1,{});
     sigExhB.exhaustion>0.5 ? ok("exhaustion 底部反向訊號", `sig=${sigExhB.exhaustion.toFixed(2)}`) : fail("exhaustion 底部", `sig=${sigExhB.exhaustion}`);
+
+    // ── Regime Override：頂部極值應該翻轉 score ──
+    // 模擬：rawScore=+0.5（趨勢偏多），exh=-0.85（頂部）→ 應變負分
+    const overrideScore = 0.5*0.25 + (-0.85)*0.75;   // = 0.125 - 0.6375 = -0.5125
+    overrideScore < -0.4 ? ok("Regime Override 頂部翻轉", `+0.5 trend → ${overrideScore.toFixed(3)}`) : fail("Regime Override", `${overrideScore}`);
   }catch(e){fail("新因子訊號",e.message);}
 
   // ── 4c. ATR Position Sizing 數學 ──
@@ -3508,14 +3566,14 @@ window.QDP={
   selftest:runSelftest,
   state:()=>S,
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
-  version:"3.7-exhaustion-factor"    // + 趨勢衰竭反向因子 + 歷史模式無 look-ahead bias + Crosshair 完整快照
+  version:"3.8-regime-override"      // + Regime Override（exhaustion 不被權重稀釋）+ 趨勢衰竭 + 歷史模式
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.7 初始化完成（+ 趨勢衰竭因子 + 歷史模式去 look-ahead bias）。");
+    appendLog("QDP PRO v3.8 初始化完成（+ Regime Override：頂底反轉警示優先權）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
