@@ -676,6 +676,18 @@ button,input,select{font:inherit}
           <div class="hint">最大可承受虧損 = 資金 × 此比例</div>
         </div>
       </div>
+      <div class="fg" style="display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:center;margin-top:6px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0">
+          <input id="autoReload" type="checkbox" style="margin:0">
+          <span>盤後自動分析</span>
+        </label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="color:var(--txt2);font-size:10px">時間</span>
+          <input id="autoReloadTime" type="time" value="13:35" style="background:var(--bg2);border:1px solid var(--line1);color:var(--txt0);padding:2px 6px;border-radius:var(--r);font-family:var(--mono);font-size:11px">
+          <span style="color:var(--txt2);font-size:9px">台股 13:30 收盤</span>
+        </div>
+      </div>
+      <div class="hint">每個交易日（週一~五）指定時間自動重新拉資料 + 寫 archive 驗證。<br>觸發前會跳 10 秒倒數提示，按 Esc 可取消當次。</div>
       <div class="fg" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line1)">
         <label style="color:var(--yellow)">📦 資料備份 / 還原（跨電腦遷移用）</label>
         <div style="display:flex;gap:6px;margin-top:6px">
@@ -870,7 +882,12 @@ const S = {
 
 /* ─── 設定 ─── */
 function loadCfg(){
-  const def={finmindToken:"",groqKey:"",btBars:180,rtSec:15,capital:1000000,riskPct:1};
+  const def={
+    finmindToken:"",groqKey:"",btBars:180,rtSec:15,
+    capital:1000000,riskPct:1,
+    autoReload:true,            // 盤後自動重新分析（archive 累積必備）
+    autoReloadTime:"13:35"      // HH:MM，台灣時間
+  };
   try{ return Object.assign(def,JSON.parse(localStorage.getItem(STORE.cfg))||{}); }
   catch{ return def; }
 }
@@ -3395,6 +3412,18 @@ function startRealtime(){
   const wlId=setInterval(()=>{if(!document.hidden) renderWatchlist();},60000);S.intervals.add(wlId);
   const tid=setTimeout(tick,1200); S.timers.add(tid);
 
+  /* ── 盤後自動分析（auto reload）──
+   *   每分鐘檢查一次：
+   *     • 設定中 autoReload 開啟
+   *     • 現在是交易日（週一~五）
+   *     • 現在時間 >= autoReloadTime（預設 13:35）
+   *     • 今日尚未自動觸發過（localStorage 記錄）
+   *     • 不在 1 小時觸發窗口外（避免半夜跳）
+   *   觸發時：顯示 10 秒倒數，按 Esc 可取消當次。 */
+  const autoRId=setInterval(autoReloadCheck, 60000);S.intervals.add(autoRId);
+  // 啟動時也立刻檢查一次（萬一使用者剛開分頁就過時間）
+  setTimeout(autoReloadCheck, 3000);
+
   // 進入背景時 log 一次，讓使用者知道仍在運作
   if(!S._bgListenerAdded){
     document.addEventListener("visibilitychange",()=>{
@@ -3540,15 +3569,20 @@ function openSettings(){
   $("btBars").value=String(cfg.btBars||180);$("rtSec").value=String(cfg.rtSec||15);
   $("capital").value=String(cfg.capital||1000000);
   $("riskPct").value=String(cfg.riskPct||1);
+  const arEl=$.real("autoReload"); if(arEl) arEl.checked = cfg.autoReload!==false;
+  $("autoReloadTime").value = cfg.autoReloadTime||"13:35";
   $("overlay").classList.add("open");
 }
 function closeSettings(){$("overlay").classList.remove("open");}
 function saveSettings(){
+  const arEl=$.real("autoReload");
   const cfg={
     finmindToken:$("fmToken").value.trim(),groqKey:$("groqKey").value.trim(),
     btBars:parseInt($("btBars").value,10)||180,rtSec:parseInt($("rtSec").value,10)||15,
     capital:Math.max(10000,parseInt($("capital").value,10)||1000000),
-    riskPct:clamp(parseFloat($("riskPct").value)||1,0.1,10)
+    riskPct:clamp(parseFloat($("riskPct").value)||1,0.1,10),
+    autoReload: arEl ? !!arEl.checked : true,
+    autoReloadTime: ($("autoReloadTime").value||"13:35").slice(0,5)
   };
   saveCfgObj(cfg);toast("設定已儲存","ok");
   appendLog(`設定更新：FinMind=${cfg.finmindToken?"已設定":"未設定"} Groq=${cfg.groqKey?"已設定":"未設定"}`);
@@ -3673,6 +3707,97 @@ function selectSuggest(id){
   if(sEl){ sEl.value=""; sEl.blur(); }
   hideSuggest();
   loadStock(id);
+}
+
+/* ════════════════════════════════════════════════════════════
+   盤後自動分析（Auto Reload）
+   ────────────────────────────────────────────────────────────
+   設計目標：每個交易日盤後自動觸發 loadStock，讓 archive 自動累積
+   觸發條件：
+     • cfg.autoReload === true
+     • 現在是交易日（週一~五；簡化版，不偵測台股休市日）
+     • 現在時間 >= autoReloadTime（預設 13:35，台股 13:30 收盤後）
+     • 今日尚未觸發過（localStorage qdp_lastAutoReload 比對）
+     • 觸發窗口：autoReloadTime 之後 1 小時內（避免半夜跳）
+   執行：
+     • 顯示 10 秒倒數通知，按 Esc 可取消當次
+     • 取消後當日不再嘗試（記入 localStorage）
+     • 用 loadStock(S.stockId) 取代 location.reload()，比較絲滑（不會閃白）
+═══════════════════════════════════════════════════════════════ */
+const STORE_AUTORELOAD = "qdp_lastAutoReload";
+let _autoReloadPending = false;
+
+function autoReloadCheck(){
+  if(_autoReloadPending) return;
+  const cfg = loadCfg();
+  if(!cfg.autoReload) return;
+  if(!S.stockId) return;
+
+  const now = taiwanNow();
+  const day = now.getDay();
+  if(day===0 || day===6) return;            // 週末跳過
+
+  const todayKey = dateKey(now);
+  const lastTrigger = localStorage.getItem(STORE_AUTORELOAD);
+  if(lastTrigger === todayKey) return;       // 今日已觸發過
+
+  const [hh, mm] = (cfg.autoReloadTime||"13:35").split(":").map(n=>parseInt(n,10));
+  if(!Number.isFinite(hh) || !Number.isFinite(mm)) return;
+  const targetMin = hh*60 + mm;
+  const curMin = now.getHours()*60 + now.getMinutes();
+
+  // 觸發窗口：targetTime ~ targetTime+60min
+  if(curMin < targetMin || curMin > targetMin + 60) return;
+
+  _doAutoReload(todayKey);
+}
+
+function _doAutoReload(todayKey){
+  _autoReloadPending = true;
+  let secs = 10;
+  let canceled = false;
+  const onEsc = e => {
+    if(e.key === "Escape"){
+      canceled = true;
+      appendLog("自動分析已取消（按 Esc）");
+    }
+  };
+  document.addEventListener("keydown", onEsc);
+
+  const tick = () => {
+    if(canceled){
+      cleanup();
+      localStorage.setItem(STORE_AUTORELOAD, todayKey);   // 取消也記入，當日不再嘗試
+      toast("✗ 自動分析已取消","ok");
+      return;
+    }
+    if(secs <= 0){
+      cleanup();
+      localStorage.setItem(STORE_AUTORELOAD, todayKey);
+      appendLog(`盤後自動分析觸發（${taiwanNow().toLocaleTimeString("zh-TW")}）`);
+      toast("⏰ 盤後自動分析中…","ok");
+      // 用 loadStock 取代 reload — 不閃白、保留 UI 狀態
+      loadStock(S.stockId, {skipAI: false}).catch(err=>{
+        console.warn("[QDP][autoReload] loadStock failed", err);
+        toast("自動分析失敗，3 秒後 hard reload","err");
+        setTimeout(()=>location.reload(), 3000);
+      });
+      return;
+    }
+    toast(`⏰ ${secs} 秒後自動盤後分析（按 Esc 取消）`,"ok");
+    secs--;
+    setTimeout(tick, 1000);
+  };
+  function cleanup(){
+    _autoReloadPending = false;
+    document.removeEventListener("keydown", onEsc);
+  }
+  tick();
+}
+
+/* 對外 API：清除「今日已觸發」標記（測試用） */
+function _resetAutoReloadFlag(){
+  try{ localStorage.removeItem(STORE_AUTORELOAD); toast("已清除自動分析旗標","ok"); }catch{}
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -4162,7 +4287,7 @@ async function runSelftest(silent=false){
     "watchList","wlInput","wlAddBtn","wlRefreshBtn","wl-count",
     "fetch-dot","fetch-label","log-body","log-count",
     "fmToken","groqKey","btBars","rtSec","saveCfgBtn","cancelCfgBtn","closeSettingsBtn","settingsBtn","overlay",
-    "exportDataBtn","importDataBtn","importDataFile",
+    "exportDataBtn","importDataBtn","importDataFile","autoReload","autoReloadTime",
     "vol-bars-wrap","mini-chart","chart-loader",
     "c1","c2","c3","c4"
   ];
@@ -4215,14 +4340,18 @@ window.QDP={
   ics:()=>S._lastICs||{},
   exportData:exportAllData,
   importData:()=>$("importDataFile").click(),
-  version:"3.15-background"          // + 背景分頁持續監控（切到別分頁警報仍會 popup）+ 資料匯出
+  resetAutoReload:_resetAutoReloadFlag,         // 開發 / 測試用：清掉「今日已觸發」標記
+  triggerAutoReload:()=>{                       // 開發 / 測試用：立即觸發一次（忽略時間/週末檢查）
+    const todayKey=dateKey(taiwanNow()); _doAutoReload(todayKey);
+  },
+  version:"3.16-auto-reload"         // + 盤後自動分析（archive 自動累積）+ 背景分頁持續監控
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.15 初始化完成（背景分頁持續監控警報）。");
+    appendLog("QDP PRO v3.16 初始化完成（盤後自動分析 + 背景監控）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
