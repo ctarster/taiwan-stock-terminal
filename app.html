@@ -79,9 +79,11 @@ button,input,select{font:inherit}
 /* 搜尋下拉建議 */
 #search-wrap{position:relative;display:inline-block}
 #search-suggest{
-  position:absolute;top:calc(100% + 3px);left:0;min-width:240px;
+  /* position:fixed — 脫離祖先的 overflow:hidden 限制（#topbar / #app 都有）
+     具體位置由 JS positionSuggest() 動態計算（依 #search input 的 bounding rect） */
+  position:fixed;min-width:240px;
   background:var(--bg1);border:1px solid var(--line1);border-radius:var(--r);
-  max-height:320px;overflow-y:auto;z-index:1000;
+  max-height:320px;overflow-y:auto;z-index:9999;
   box-shadow:0 6px 20px rgba(0,0,0,.6);display:none;
 }
 #search-suggest.open{display:block}
@@ -2900,6 +2902,18 @@ function pushRecentSearch(id){
 
 let _suggestState = { items:[], activeIdx:-1 };
 
+/* positionSuggest — fixed 定位下拉到 #search 輸入框正下方
+   每次顯示下拉前呼叫，並監聽 resize / scroll 重新對齊 */
+function positionSuggest(){
+  const inp = $.real("search");
+  const list = $.real("search-suggest");
+  if(!inp || !list) return;
+  const r = inp.getBoundingClientRect();
+  list.style.top  = (r.bottom + 3) + "px";
+  list.style.left = r.left + "px";
+  list.style.minWidth = Math.max(240, r.width) + "px";
+}
+
 function _scoreMatch(id, name, qLower, qIsNumeric){
   // 排名分數：完全相同 100、ID 前綴 80、名稱開頭 60、ID 子字串 40、名稱子字串 20
   const idLower=id.toLowerCase(), nameLower=name.toLowerCase();
@@ -2956,6 +2970,7 @@ function renderSuggest(query){
   }
   list.innerHTML = html;
   list.classList.add("open");
+  positionSuggest();             // 動態定位到 #search 正下方
 }
 
 function updateSuggestActive(){
@@ -3093,7 +3108,7 @@ function bindEvents(){
     if(S.miniChartRAF) cancelAnimationFrame(S.miniChartRAF);
     cleanupCharts();
   });
-  window.addEventListener("resize",()=>drawMiniChart());
+  window.addEventListener("resize",()=>{ drawMiniChart(); positionSuggest(); });
 
   document.addEventListener("visibilitychange",()=>{
     if(!document.hidden&&S.stockId){
