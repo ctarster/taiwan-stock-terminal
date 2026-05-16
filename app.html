@@ -3357,28 +3357,30 @@ MA5 ${fp(r.ma5)} / MA20 ${fp(r.ma20)} / MA60 ${fp(r.ma60)}
 }
 
 /* ── 即時輪詢 ──
- *   機構級修正：
- *   1. 清乾淨 S.intervals + S.timers（startRealtime 被 saveSettings 重複呼叫時不會留下殭屍 tick）
- *   2. setTimeout 也納入 S.timers，beforeunload 一併清除
- *   3. loadToken 守門：tick 開始記 token，回來後對比，過期則整個 tick 丟棄（避免在 loadStock(新標的) 期間舊報價污染新狀態）
- */
+ *   v3.15 改變：背景分頁繼續運作
+ *     • 主 tick（報價 + 警報）移除 document.hidden 守門 — 切到別分頁也跑
+ *     • 警報觸發時走 Notification API → 即使背景仍會桌面 popup
+ *     • Chrome / Firefox 對背景分頁自動 throttle 到 ~1Hz，故 15s tick 仍可執行（實際可能 15-60s）
+ *     • 重 UI 操作（DOM 渲染）在背景時仍跑，但會被瀏覽器低優先處理
+ *     • watchlist 60s refresh 保留 hidden 守門（耗 API 多筆、非關鍵）
+ *   token 雙重守門保留：避免 loadStock 換標的後舊 tick 污染。 */
 function startRealtime(){
   S.intervals.forEach(id=>clearInterval(id));S.intervals.clear();
   S.timers.forEach(id=>clearTimeout(id));S.timers.clear();
   const cfg=loadCfg(),sec=Math.max(5,+cfg.rtSec||15);
   const tick=async()=>{
-    if(!S.stockId||document.hidden) return;
+    if(!S.stockId) return;                              // 沒載入標的才跳過；不再因背景而停
     const tickToken=S.loadToken;
     setFetchStatus("busy");
     try{
       const live=await fetchTWSELive(S.stockId);
-      // Token 守門：loadStock 期間 token 已遞增 → 本次 tick 報價屬於舊標的，丟棄
       if(tickToken!==S.loadToken) return;
-      // 報價自身也帶 token（fetchTWSELive 內部記錄），雙保險
       if(live && live._token!=null && live._token!==tickToken) return;
       if(live){
         S.liveQuote=live;
         recordTodayPrice(live);
+        // 背景時也要 render — 雖然看不到，但若使用者切回來可看到最新值；
+        // 重點：checkAlerts 在背景仍會觸發 Notification API 桌面通知
         renderLiveQuoteBoard();
         checkAlerts(live.price);
         setFetchStatus(live.stale?"err":"ok");
@@ -3389,8 +3391,19 @@ function startRealtime(){
     }catch{ if(tickToken===S.loadToken) setFetchStatus("err"); }
   };
   const id=setInterval(tick,sec*1000);S.intervals.add(id);
+  // 自選清單 refresh：仍只在前景跑（避免背景背景持續耗多筆 API）
   const wlId=setInterval(()=>{if(!document.hidden) renderWatchlist();},60000);S.intervals.add(wlId);
   const tid=setTimeout(tick,1200); S.timers.add(tid);
+
+  // 進入背景時 log 一次，讓使用者知道仍在運作
+  if(!S._bgListenerAdded){
+    document.addEventListener("visibilitychange",()=>{
+      if(document.hidden && S.stockId && isTradingHour()){
+        try{ appendLog("分頁切至背景 — 警報與報價仍持續監控（速率約降至 1Hz）"); }catch{}
+      }
+    });
+    S._bgListenerAdded=true;
+  }
 }
 
 /* ── 警報 ── */
@@ -4202,14 +4215,14 @@ window.QDP={
   ics:()=>S._lastICs||{},
   exportData:exportAllData,
   importData:()=>$("importDataFile").click(),
-  version:"3.14-portable"            // + 資料匯出 / 匯入（換電腦遷移）+ Bayesian Shrinkage IC
+  version:"3.15-background"          // + 背景分頁持續監控（切到別分頁警報仍會 popup）+ 資料匯出
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.14 初始化完成（+ 資料匯出 / 匯入，換電腦無痛遷移）。");
+    appendLog("QDP PRO v3.15 初始化完成（背景分頁持續監控警報）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
