@@ -1651,6 +1651,12 @@ function predictNext(rows,livePrice,ext={}){
   const factors=Object.keys(weights).map(name=>({name,sig:sig[name],w:weights[name]}));
   const rawScore=factors.reduce((a,f)=>a+f.sig*f.w,0);
 
+  /* 共識強度 — 強多因子權重和 vs 強空因子權重和的差
+     範圍 [0,1]：1 = 全部因子同向；0 = 完全分歧。低共識代表訊號混亂，不該重壓。 */
+  const last=rows[i];
+  const atr=Math.max(0.01,sn(last.atr,last.close*0.02));
+  const consensus=Math.abs(factors.filter(f=>f.sig>.15).reduce((a,f)=>a+f.w,0)-factors.filter(f=>f.sig<-.15).reduce((a,f)=>a+f.w,0));
+
   /* ── Regime Override（v3.10 校準版）──
    *   過往版本過度激進：強趨勢中也被反轉，導致主升段提早出場、總報酬下降。
    *   平衡版調整：
@@ -1661,7 +1667,7 @@ function predictNext(rows,livePrice,ext={}){
   const exh=sn(sig.exhaustion,0);
   const absExh=Math.abs(exh);
   // 趨勢力道：MACD 柱狀體 (hist) 絕對值大 = 強趨勢，降低 override 強度
-  const trendStrength = Math.min(1, Math.abs(sn(rows[i].hist,0)) / (atr*0.8));   // 0~1
+  const trendStrength = Math.min(1, Math.abs(sn(last.hist,0)) / (atr*0.8));   // 0~1
   const overrideDamper = 1 - trendStrength*0.4;   // 強趨勢 → 0.6（damper 40%），弱趨勢 → 1.0
 
   let score=rawScore, regimeNote="";
@@ -1680,11 +1686,6 @@ function predictNext(rows,livePrice,ext={}){
     score = rawScore*0.80 + exh*0.10*overrideDamper;
     regimeNote = exh>0 ? "△ 底部關注" : "△ 頂部關注";
   }
-  /* 共識強度 — 強多因子權重和 vs 強空因子權重和的差
-     範圍 [0,1]：1 = 全部因子同向；0 = 完全分歧。低共識代表訊號混亂，不該重壓。 */
-  const last=rows[i];
-  const atr=Math.max(0.01,sn(last.atr,last.close*0.02));
-  const consensus=Math.abs(factors.filter(f=>f.sig>.15).reduce((a,f)=>a+f.w,0)-factors.filter(f=>f.sig<-.15).reduce((a,f)=>a+f.w,0));
 
   /* ── 機構級信心度公式（v3.3）──
    *  舊：clamp(45 + |score|×50 + consensus×10, 35, 95) — 18 因子稀釋後 |score| 常 ~0.1
@@ -3554,6 +3555,20 @@ async function runSelftest(silent=false){
     const overrideScore = 0.5*0.25 + (-0.85)*0.75;   // = 0.125 - 0.6375 = -0.5125
     overrideScore < -0.4 ? ok("Regime Override 頂部翻轉", `+0.5 trend → ${overrideScore.toFixed(3)}`) : fail("Regime Override", `${overrideScore}`);
   }catch(e){fail("新因子訊號",e.message);}
+
+  // ── 4i. predictNext 完整路徑 smoke test（捕捉 TDZ / undefined 變數 bug）──
+  try{
+    const trendRows=Array.from({length:120},(_,i)=>{
+      const base=100+i*0.5, vol=1+Math.sin(i*0.3)*0.3;
+      return {time:`2024-${String(Math.floor(i/30)+1).padStart(2,"0")}-${String((i%30)+1).padStart(2,"0")}`,open:base,high:base+vol,low:base-vol*0.7,close:base+vol*0.3,volume:1000};
+    });
+    const enr=enrichRows(trendRows);
+    // 暫存 stockId 避免 cached 走 localStorage 路徑
+    const savedId=S.stockId; S.stockId="__selftest__";
+    const p=predictNext(enr, enr[enr.length-1].close, {});
+    S.stockId=savedId; S.weightsCache=null;
+    p && Number.isFinite(p.score) && Number.isFinite(p.confidence) ? ok("predictNext 完整路徑可執行", `score=${p.score.toFixed(3)} conf=${p.confidence.toFixed(0)}%`) : fail("predictNext 路徑異常", JSON.stringify(p));
+  }catch(e){fail("predictNext 路徑",e.message);}
 
   // ── 4h. IC 計算正確性 ──
   try{
