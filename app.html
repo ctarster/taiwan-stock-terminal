@@ -2986,11 +2986,11 @@ async function runSelftest(silent=false){
 
   // ── 4d. calcRelReturn 邏輯 ──
   try{
-    const stock=Array.from({length:10},(_,i)=>({time:`2024-01-${10+i}`,close:100+i*2}));    // +18%
-    const twii =Array.from({length:10},(_,i)=>({time:`2024-01-${10+i}`,close:1000+i*5}));   // +4.5%
+    const stock=Array.from({length:10},(_,i)=>({time:`2024-01-${10+i}`,close:100+i*2}));    // 100→118
+    const twii =Array.from({length:10},(_,i)=>({time:`2024-01-${10+i}`,close:1000+i*5}));   // 1000→1045
     const rr=calcRelReturn(stock,twii,5);
-    // 個股 5 日報酬 = (108-100)/100 = 8%，大盤 = (1025-1000)/1000 = 2.5%，差 ≈ 5.5%
-    Math.abs(rr-0.055)<0.005 ? ok("calcRelReturn 正確", `relReturn5=${(rr*100).toFixed(2)}%`) : fail("calcRelReturn", `rr=${rr}`);
+    // 5 日相對報酬：個股 (118-108)/108 = 9.26%，大盤 (1045-1020)/1020 = 2.45%，差 ≈ 6.81%
+    Math.abs(rr-0.0681)<0.005 ? ok("calcRelReturn 正確", `relReturn5=${(rr*100).toFixed(2)}%`) : fail("calcRelReturn", `rr=${rr}`);
   }catch(e){fail("calcRelReturn",e.message);}
 
   // ── 4e. 三大法人 streak 計算（從合成資料） ──
