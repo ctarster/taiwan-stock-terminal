@@ -74,8 +74,34 @@ button,input,select{font:inherit}
 .tf-btn{font-size:10px;font-family:var(--mono);padding:3px 7px;background:transparent;border:1px solid var(--line1);color:var(--txt2);border-radius:var(--r);cursor:pointer;transition:.12s}
 .tf-btn:hover{border-color:var(--line2);color:var(--txt1)}
 .tf-btn.active{border-color:var(--blue);color:var(--blue);background:rgba(58,143,245,.08)}
-.tb-input{background:var(--bg2);border:1px solid var(--line1);color:var(--txt0);padding:3px 8px;border-radius:var(--r);width:90px;outline:none;font-family:var(--mono)}
+.tb-input{background:var(--bg2);border:1px solid var(--line1);color:var(--txt0);padding:3px 8px;border-radius:var(--r);width:140px;outline:none;font-family:var(--mono)}
 .tb-input:focus{border-color:var(--blue)}
+/* 搜尋下拉建議 */
+#search-wrap{position:relative;display:inline-block}
+#search-suggest{
+  position:absolute;top:calc(100% + 3px);left:0;min-width:240px;
+  background:var(--bg1);border:1px solid var(--line1);border-radius:var(--r);
+  max-height:320px;overflow-y:auto;z-index:1000;
+  box-shadow:0 6px 20px rgba(0,0,0,.6);display:none;
+}
+#search-suggest.open{display:block}
+#search-suggest .ss-group{
+  padding:4px 10px;font-size:9px;color:var(--txt2);
+  background:var(--bg2);border-bottom:1px solid var(--line2);
+  text-transform:uppercase;letter-spacing:.5px;
+}
+#search-suggest .ss-item{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:6px 10px;cursor:pointer;font-size:11px;
+  border-bottom:1px solid var(--line2);
+}
+#search-suggest .ss-item:last-child{border-bottom:none}
+#search-suggest .ss-item:hover,
+#search-suggest .ss-item.active{background:var(--bg2)}
+#search-suggest .ss-item.active{border-left:2px solid var(--blue);padding-left:8px}
+#search-suggest .ss-id{font-family:var(--mono);color:var(--blue);font-weight:600;font-size:11px}
+#search-suggest .ss-nm{color:var(--txt1);margin-left:12px}
+#search-suggest .ss-empty{padding:12px;text-align:center;color:var(--txt2);font-size:10px}
 .tb-btn{font-size:10px;padding:4px 9px;border:1px solid var(--line1);background:var(--bg2);color:var(--txt1);border-radius:var(--r);cursor:pointer;transition:.12s;white-space:nowrap}
 .tb-btn:hover{border-color:var(--line2);background:var(--bg3);color:var(--txt0)}
 .tb-btn.primary{border-color:var(--blue);color:var(--blue);background:rgba(58,143,245,.08)}
@@ -320,7 +346,10 @@ button,input,select{font:inherit}
         <button class="tf-btn" data-tf="M">月K</button>
       </div>
       <div class="sep"></div>
-      <input class="tb-input" id="search" placeholder="代號…" type="text">
+      <div id="search-wrap">
+        <input class="tb-input" id="search" placeholder="代號或名稱（例：2330 / 台積電）" type="text" autocomplete="off">
+        <div id="search-suggest" role="listbox" aria-label="搜尋建議"></div>
+      </div>
       <button class="tb-btn primary" id="searchBtn">查詢</button>
       <button class="tb-btn" id="watchBtn">+ 自選</button>
       <button class="tb-btn" id="exportBtn">匯出</button>
@@ -672,12 +701,43 @@ button,input,select{font:inherit}
    14. [修正] 收盤價 oC 顯示紅/綠顏色
 ================================================================ */
 
+/* 台股名單 — 熱門個股 + 主流 ETF，搜尋自動補全用
+ *   涵蓋：權值前 50、半導體鏈、面板、航運、生技、金融、電子代工、ETF
+ *   不在表內的代號仍可手動輸入查詢（FinMind 抓得到就能用） */
 const KNOWN = {
-  "2330":"台積電","2317":"鴻海","2454":"聯發科","3481":"群創","2409":"友達",
-  "2603":"長榮","2609":"陽明","2615":"萬海","2382":"廣達","3231":"緯創",
-  "2308":"台達電","2412":"中華電","2881":"富邦金","2882":"國泰金",
-  "6505":"台塑化","1301":"台塑","1303":"南亞","3037":"欣興","2337":"旺宏",
-  "2379":"瑞昱","5483":"中美晶","3714":"兆利","2345":"智邦","6669":"緯穎"
+  // 半導體 / 權值
+  "2330":"台積電","2317":"鴻海","2454":"聯發科","2303":"聯電","2308":"台達電",
+  "2474":"可成","3034":"聯詠","3035":"智原","3037":"欣興","3711":"日月光投控",
+  "3661":"世芯-KY","6488":"環球晶","4938":"和碩","2382":"廣達","2357":"華碩",
+  "2353":"宏碁","2356":"英業達","2376":"技嘉","2377":"微星","2379":"瑞昱",
+  "2412":"中華電","4904":"遠傳","3045":"台灣大",
+  // 記憶體 / 面板
+  "2337":"旺宏","2344":"華邦電","3481":"群創","2409":"友達","3030":"德律",
+  // 航運
+  "2603":"長榮","2609":"陽明","2615":"萬海","2618":"長榮航","2610":"華航","2606":"裕民",
+  // 鋼鐵 / 塑化
+  "2002":"中鋼","1301":"台塑","1303":"南亞","6505":"台塑化","1326":"台化","1102":"亞泥","1101":"台泥",
+  // 金融
+  "2881":"富邦金","2882":"國泰金","2884":"玉山金","2885":"元大金","2886":"兆豐金",
+  "2887":"台新金","2888":"新光金","2890":"永豐金","2891":"中信金","2892":"第一金",
+  "5880":"合庫金","2883":"開發金","2880":"華南金","5876":"上海商銀","2823":"中壽",
+  // 生技
+  "4128":"中天","4174":"浩鼎","6446":"藥華藥","1707":"葡萄王","6451":"訊芯-KY",
+  // 通訊 / 5G
+  "2345":"智邦","2492":"華新科","6669":"緯穎","3035":"智原",
+  // 其他熱門
+  "2207":"和泰車","9921":"巨大","9914":"美利達","2105":"正新","6116":"彩晶",
+  "3231":"緯創","2354":"鴻準","3008":"大立光","6271":"同欣電","5483":"中美晶",
+  "3714":"兆利","6770":"力積電","8046":"南電","3017":"奇鋐","2376":"技嘉",
+  "1216":"統一","2912":"統一超","1227":"佳格","9910":"豐泰","2542":"興富發",
+  "3034":"聯詠","3260":"威剛","3406":"玉晶光","6271":"同欣電","3552":"同致",
+  // 主流 ETF（市值前段）
+  "0050":"元大台灣50","0051":"元大中型100","0052":"富邦科技","0056":"元大高股息",
+  "00692":"富邦公司治理","00713":"元大高息低波","00850":"元大ESG永續",
+  "00878":"國泰永續高股息","00881":"國泰台灣5G+","00891":"中信關鍵半導體",
+  "00892":"富邦台灣半導體","00900":"富邦特選高股息","00929":"復華台灣科技優息",
+  "00935":"野村臺灣新科技50","00939":"統一台灣高息動能","00940":"元大臺灣價值高息",
+  "00713":"元大高息低波","006208":"富邦台50","00679B":"元大美債20年","00687B":"國泰20年美債",
 };
 const STORE = { cfg:"qdp31_cfg", watch:"qdp31_watch", alerts:"qdp31_alerts", pred:"qdp31_pred" };
 /* BASE_W — 多因子初始權重（會被 adaptiveWeights 動態校準）
@@ -2818,6 +2878,111 @@ function saveSettings(){
   closeSettings();startRealtime();if(S.rawRows.length) applyTimeframe(false);
 }
 
+/* ════════════════════════════════════════════
+   搜尋建議引擎（autocomplete）
+   ────────────────────────────────────────────
+   • 輸入時即時過濾 KNOWN — 純數字走代號前綴；含中文 / 英文走名稱 substring
+   • 空字串時顯示「最近查詢」（localStorage 持久化 8 筆）
+   • 鍵盤：↑↓ 選取、Enter 確認、Esc 關閉
+   • 點擊建議項直接載入
+   • 完全 client-side — 不需要 API、不需要網路
+═══════════════════════════════════════════════ */
+const STORE_RECENT = "qdp34_recent_search";
+function getRecentSearches(){
+  try{ const v=JSON.parse(localStorage.getItem(STORE_RECENT)); return Array.isArray(v)?v:[]; }catch{return [];}
+}
+function pushRecentSearch(id){
+  if(!id) return;
+  const list=getRecentSearches().filter(x=>x!==id);
+  list.unshift(id);
+  try{ localStorage.setItem(STORE_RECENT, JSON.stringify(list.slice(0,8))); }catch{}
+}
+
+let _suggestState = { items:[], activeIdx:-1 };
+
+function _scoreMatch(id, name, qLower, qIsNumeric){
+  // 排名分數：完全相同 100、ID 前綴 80、名稱開頭 60、ID 子字串 40、名稱子字串 20
+  const idLower=id.toLowerCase(), nameLower=name.toLowerCase();
+  if(idLower===qLower) return 100;
+  if(qIsNumeric && idLower.startsWith(qLower)) return 80;
+  if(nameLower.startsWith(qLower)) return 60;
+  if(idLower.includes(qLower))   return 40;
+  if(nameLower.includes(qLower)) return 20;
+  return 0;
+}
+
+function renderSuggest(query){
+  const list = $.real("search-suggest");
+  if(!list) return;
+  const q = String(query||"").trim();
+  const qLower = q.toLowerCase();
+  const qIsNumeric = /^\d+$/.test(q);
+
+  let html = "";
+  if(!q){
+    // 空字串：顯示最近查詢
+    const recent = getRecentSearches();
+    if(!recent.length){
+      list.classList.remove("open"); list.innerHTML=""; _suggestState={items:[],activeIdx:-1};
+      return;
+    }
+    html = `<div class="ss-group">最近查詢</div>` + recent.map((id,i)=>
+      `<div class="ss-item" data-id="${id}" data-i="${i}"><span class="ss-id">${id}</span><span class="ss-nm">${KNOWN[id]||""}</span></div>`
+    ).join("");
+    _suggestState={items:recent,activeIdx:-1};
+  } else {
+    // 過濾 + 排序
+    const scored = Object.entries(KNOWN)
+      .map(([id,name])=>({id,name,score:_scoreMatch(id,name,qLower,qIsNumeric)}))
+      .filter(x=>x.score>0)
+      .sort((a,b)=>b.score-a.score || a.id.localeCompare(b.id))
+      .slice(0,10);
+    if(!scored.length){
+      // 純數字找不到名單裡 → 提供「直接查 #####」選項（FinMind 可能有）
+      if(qIsNumeric && q.length>=4){
+        html = `<div class="ss-group">未在名單，直接查詢</div>` +
+               `<div class="ss-item" data-id="${q}" data-i="0"><span class="ss-id">${q}</span><span class="ss-nm">直接送出代號</span></div>`;
+        _suggestState={items:[q],activeIdx:-1};
+      } else {
+        html = `<div class="ss-empty">找不到「${q}」<br>試試代號（如 2330）或公司名（如 台積電）</div>`;
+        _suggestState={items:[],activeIdx:-1};
+      }
+    } else {
+      html = scored.map((x,i)=>
+        `<div class="ss-item" data-id="${x.id}" data-i="${i}"><span class="ss-id">${x.id}</span><span class="ss-nm">${x.name}</span></div>`
+      ).join("");
+      _suggestState={items:scored.map(x=>x.id),activeIdx:-1};
+    }
+  }
+  list.innerHTML = html;
+  list.classList.add("open");
+}
+
+function updateSuggestActive(){
+  const list=$.real("search-suggest"); if(!list) return;
+  list.querySelectorAll(".ss-item").forEach((el,i)=>{
+    el.classList.toggle("active", i===_suggestState.activeIdx);
+  });
+  // 滾動讓 active 項可見
+  const active=list.querySelector(".ss-item.active");
+  if(active) active.scrollIntoView({block:"nearest"});
+}
+
+function hideSuggest(){
+  const list=$.real("search-suggest");
+  if(list) list.classList.remove("open");
+  _suggestState={items:[],activeIdx:-1};
+}
+
+function selectSuggest(id){
+  if(!id) return;
+  pushRecentSearch(id);
+  const sEl=$.real("search");
+  if(sEl){ sEl.value=""; sEl.blur(); }
+  hideSuggest();
+  loadStock(id);
+}
+
 /* ── 事件 ── */
 function bindEvents(){
   $("settingsBtn").addEventListener("click",e=>{e.stopPropagation();openSettings();});
@@ -2835,9 +3000,49 @@ function bindEvents(){
     });
   });
 
-  const doSearch=()=>{const v=$("search").value.trim();if(v){loadStock(v);$("search").value="";}};
+  // ── 搜尋（含 autocomplete）──
+  const doSearch=()=>{
+    const v=$("search").value.trim();
+    if(!v) return;
+    // 若輸入非純數字（如「台積電」），先嘗試從建議列表抓第一個對應 id
+    if(!/^\d+$/.test(v) && _suggestState.items.length>0){
+      selectSuggest(_suggestState.items[0]);
+      return;
+    }
+    pushRecentSearch(v); loadStock(v); $("search").value=""; hideSuggest();
+  };
   $("searchBtn").addEventListener("click",doSearch);
-  $("search").addEventListener("keydown",e=>{if(e.key==="Enter") doSearch();});
+  $("search").addEventListener("input",e=>renderSuggest(e.target.value));
+  $("search").addEventListener("focus",e=>renderSuggest(e.target.value));
+  // blur 延遲，讓 click 事件先觸發
+  $("search").addEventListener("blur",()=>setTimeout(hideSuggest,180));
+  $("search").addEventListener("keydown",e=>{
+    const n=_suggestState.items.length;
+    if(n>0){
+      if(e.key==="ArrowDown"){e.preventDefault(); _suggestState.activeIdx=(_suggestState.activeIdx+1)%n; updateSuggestActive(); return;}
+      if(e.key==="ArrowUp")  {e.preventDefault(); _suggestState.activeIdx=(_suggestState.activeIdx-1+n)%n; updateSuggestActive(); return;}
+      if(e.key==="Enter"){
+        e.preventDefault();
+        // 優先順序：有選中項用選中項 → 否則用第一個建議（避免輸入「台積電」按 Enter 被當代號送出）
+        if(_suggestState.activeIdx>=0) selectSuggest(_suggestState.items[_suggestState.activeIdx]);
+        else if(_suggestState.items.length>0) selectSuggest(_suggestState.items[0]);
+        else doSearch();
+        return;
+      }
+      if(e.key==="Escape"){hideSuggest(); return;}
+    } else if(e.key==="Enter"){
+      doSearch();
+    }
+  });
+  // 點擊建議項
+  const sugEl=$.real("search-suggest");
+  if(sugEl){
+    sugEl.addEventListener("mousedown",e=>{
+      // 用 mousedown（不是 click）— 避免 input.blur() 先於 click 觸發導致下拉先關閉
+      const item=e.target.closest("[data-id]");
+      if(item){ e.preventDefault(); selectSuggest(item.dataset.id); }
+    });
+  }
   $("watchBtn").addEventListener("click",()=>addWatch(S.stockId));
   $("exportBtn").addEventListener("click",exportReport);
   $("addAlertBtn").addEventListener("click",addAlert);
@@ -3039,6 +3244,18 @@ async function runSelftest(silent=false){
     Math.abs(rr-0.0681)<0.005 ? ok("calcRelReturn 正確", `relReturn5=${(rr*100).toFixed(2)}%`) : fail("calcRelReturn", `rr=${rr}`);
   }catch(e){fail("calcRelReturn",e.message);}
 
+  // ── 4f. 搜尋建議排序 ──
+  try{
+    // 確認 _scoreMatch 排序符合預期：完全相同 > 前綴 > 子字串
+    const s1=_scoreMatch("2330","台積電","2330",true);
+    const s2=_scoreMatch("2330","台積電","2",true);
+    const s3=_scoreMatch("2330","台積電","台積",false);
+    const s4=_scoreMatch("2330","台積電","電",false);
+    (s1>s2 && s2>s4 && s3>s4) ? ok("搜尋排序分數正確", `exact=${s1} prefix=${s2} 子字串=${s4}`) : fail("搜尋排序", `s1=${s1} s2=${s2} s3=${s3} s4=${s4}`);
+    // 名稱搜尋應該找到正確股票
+    Object.entries(KNOWN).filter(([id,n])=>n==="台積電").length===1 ? ok("KNOWN 名單載入") : fail("KNOWN");
+  }catch(e){fail("搜尋建議",e.message);}
+
   // ── 4e. 三大法人 streak 計算（從合成資料） ──
   try{
     // 模擬 fetchInstitutional 內 calcStreak 邏輯
@@ -3077,7 +3294,7 @@ async function runSelftest(silent=false){
     "btReturn","btWin","btPF","btSharpe","bt-badge","bt-text",
     "capital","riskPct",
     "ai-body","ai-badge",
-    "search","searchBtn","watchBtn","exportBtn",
+    "search","searchBtn","search-suggest","search-wrap","watchBtn","exportBtn",
     "alertType","alertPrice","addAlertBtn","alertsList","alert-badge",
     "watchList","wlInput","wlAddBtn","wlRefreshBtn","wl-count",
     "fetch-dot","fetch-label","log-body","log-count",
@@ -3130,14 +3347,14 @@ window.QDP={
   selftest:runSelftest,
   state:()=>S,
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
-  version:"3.4-institutional-rr2"   // R:R 1:2 + 趨勢過濾 + sigmoid 信心 + 多時框 + ATR sizing + relStr + chipStreak
+  version:"3.5-search-autocomplete" // + 搜尋建議（代號/名稱混合 + 最近查詢）+ R:R 1:2 + 趨勢過濾
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.4 初始化完成（R:R 1:2 + 趨勢過濾 + sigmoid 信心 + 多時框 + ATR sizing）。");
+    appendLog("QDP PRO v3.5 初始化完成（+ 搜尋建議 + R:R 1:2 + 趨勢過濾 + 多時框 + ATR sizing）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
