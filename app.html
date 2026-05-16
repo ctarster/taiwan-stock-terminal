@@ -429,9 +429,10 @@ button,input,select{font:inherit}
             </div>
             <div class="prog"><div class="prog-fill" id="prob-fill" style="width:50%;background:linear-gradient(90deg,var(--green),var(--yellow),var(--red))"></div></div>
           </div>
+          <div style="padding:0 10px 4px;font-size:8px;color:var(--txt2);text-align:right" id="ic-meta">校準樣本：—</div>
           <div style="padding:0 10px 8px">
             <table class="tbl">
-              <thead><tr><th>因子</th><th>訊號</th><th>權重</th><th title="Information Coefficient — 訊號與隔日報酬的 Pearson 相關性。|IC|>0.10 屬機構級單因子預測力">IC</th></tr></thead>
+              <thead><tr><th>因子</th><th>訊號</th><th>權重</th><th title="收縮後 IC（原始 IC）— Bayesian shrinkage 校正小樣本雜訊；|IC|>0.10 才算有預測力">IC</th></tr></thead>
               <tbody id="factor-rows"></tbody>
             </table>
           </div>
@@ -1792,15 +1793,26 @@ function factorSignalsAt(rows,i,ext={}){
    不論因子發訊頻率，只看訊號與隔日報酬的真實相關性。
 ═══════════════════════════════════════════════════════════════ */
 
-/* calcAllFactorICs — 對所有因子計算 IC（一次走過 rows，效能 O(n×k)） */
+/* calcAllFactorICs — 計算每個因子的 IC（Information Coefficient）
+ *   v3.13 升級：Bayesian Shrinkage
+ *     原始 IC 的標準誤 SE(IC) ≈ 1/√n
+ *     n=120 時 SE ≈ 0.091，|IC|<0.18 都在 1σ 雜訊範圍內
+ *     直接用原始 IC 會把雜訊當訊號放大權重
+ *   收縮公式：IC_shrunk = IC × n / (n + k)
+ *     k=50：n=120 → 0.71×；n=50 → 0.5×；n=20 → 0.29×
+ *     小樣本時主動朝零收縮，避免 overfit 雜訊
+ *   參考：James-Stein estimator / Bayesian shrinkage（Efron & Morris 1977）
+ *         AQR Capital 的 cross-sectional factor IC 計算也用類似收縮
+ *   另存原始 IC（rawICs）供 UI 顯示（讓使用者看「原始 vs 收縮後」差異）
+ */
 function calcAllFactorICs(rows, ext={}, lookback=120){
   const names=Object.keys(BASE_W);
-  const out={}; names.forEach(k=>out[k]=0);
+  const out={}; const raw={}; names.forEach(k=>{out[k]=0; raw[k]=0;});
   const n=rows.length;
-  if(n<30) return out;
+  if(n<30){ try{S._lastRawICs=raw;}catch{} return out; }
   const start=Math.max(40, n-lookback-1);
   const end=n-1;
-  if(end<=start+10) return out;
+  if(end<=start+10){ try{S._lastRawICs=raw;}catch{} return out; }
 
   // 收集訊號與隔日報酬序列
   const sigsArr={}; names.forEach(k=>sigsArr[k]=[]);
@@ -1812,13 +1824,22 @@ function calcAllFactorICs(rows, ext={}, lookback=120){
     rets.push(ret);
     names.forEach(k=>sigsArr[k].push(sn(sig[k],0)));
   }
-  if(rets.length<20) return out;
+  const sampleN = rets.length;
+  if(sampleN<20){ try{S._lastRawICs=raw;}catch{} return out; }
 
-  // Pearson correlation：先算 return 的均值與離差平方和
+  // Pearson correlation
   const mean=arr=>arr.reduce((a,b)=>a+b,0)/arr.length;
   const mr=mean(rets);
   let dR=0; for(const r of rets) dR+=(r-mr)*(r-mr);
-  if(dR<=0) return out;
+  if(dR<=0){ try{S._lastRawICs=raw;}catch{} return out; }
+
+  /* Bayesian Shrinkage 係數：k=50
+     n=120 樣本 → 0.706 收縮（保留 70% 強度）
+     n=60  樣本 → 0.545
+     n=30  樣本 → 0.375
+     n=20  樣本 → 0.286（強烈朝零收縮 — 樣本太少，IC 不可信） */
+  const K_SHRINK = 50;
+  const shrinkFactor = sampleN / (sampleN + K_SHRINK);
 
   names.forEach(k=>{
     const arr=sigsArr[k];
@@ -1830,8 +1851,16 @@ function calcAllFactorICs(rows, ext={}, lookback=120){
       dS  += xs*xs;
     }
     const denom=Math.sqrt(dS*dR);
-    out[k] = denom>0 ? num/denom : 0;
+    const icRaw = denom>0 ? num/denom : 0;
+    raw[k] = icRaw;
+    out[k] = icRaw * shrinkFactor;   // 收縮後 IC
   });
+  // 暴露兩組值供 UI / 診斷使用
+  try{
+    S._lastRawICs = raw;
+    S._lastICSampleN = sampleN;
+    S._lastShrinkFactor = shrinkFactor;
+  }catch{}
   return out;
 }
 
@@ -2661,19 +2690,27 @@ function renderPrediction(){
   const tbody=$("factor-rows");tbody.innerHTML="";
   const frag=document.createDocumentFragment();
   const ics=S._lastICs||{};
+  const rawICs=S._lastRawICs||{};
   [...p.factors].sort((a,b)=>b.w-a.w).forEach(f=>{
     const tr=document.createElement("tr");
     const cls=f.sig>.15?"c-red":f.sig<-.15?"c-green":"c-muted";
     const arrow=f.sig>.15?"▲ 偏多":f.sig<-.15?"▼ 偏空":"─ 中性";
     const ic=sn(ics[f.name],0);
-    // IC 顏色：|IC|>0.10 機構級綠、0.05-0.10 黃、<0.05 灰
+    const icRaw=sn(rawICs[f.name],0);
+    // 顏色判定用「收縮後 IC」— 反映真實預測力（消除小樣本噪音後）
     const icAbs=Math.abs(ic);
     const icCls = icAbs>0.10?"c-red":icAbs>0.05?"c-yellow":"c-muted";
-    const icText = ic.toFixed(3);
-    tr.innerHTML=`<td>${FACTOR_LABELS[f.name]||f.name}</td><td class="${cls}">${arrow}</td><td style="font-family:var(--mono)">${(f.w*100).toFixed(1)}%</td><td class="${icCls}" style="font-family:var(--mono);text-align:right">${icText}</td>`;
+    // 顯示「收縮後 (原始)」— 若兩值差距大代表樣本不足，原始值不可信
+    const showRaw = Math.abs(icRaw-ic)>0.02;
+    const icText = showRaw ? `${ic.toFixed(2)} (${icRaw.toFixed(2)})` : ic.toFixed(2);
+    tr.innerHTML=`<td>${FACTOR_LABELS[f.name]||f.name}</td><td class="${cls}">${arrow}</td><td style="font-family:var(--mono)">${(f.w*100).toFixed(1)}%</td><td class="${icCls}" style="font-family:var(--mono);text-align:right;font-size:9px" title="收縮後 IC（原始 IC）— Bayesian shrinkage 校正小樣本雜訊">${icText}</td>`;
     frag.appendChild(tr);
   });
   tbody.appendChild(frag);
+  // 顯示校準樣本量與收縮係數，讓使用者知道資料品質
+  const sampleN=sn(S._lastICSampleN,0);
+  const shrink=sn(S._lastShrinkFactor,1);
+  $t("ic-meta",`校準樣本 ${sampleN} 根 ｜ 收縮 ${(shrink*100).toFixed(0)}%（樣本越少越朝零收縮）`);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -2805,20 +2842,24 @@ function renderHistoricalSnapshot(timeStr){
   $st("prob-fill","width",pUp+"%");
   $t("lastScore", (score>=0?"+":"")+score.toFixed(3));
 
-  // ── 因子表（依該日訊號重排）+ IC 欄 ──
+  // ── 因子表（依該日訊號重排）+ IC 欄（收縮後 + 原始）──
   const tbody = $.real("factor-rows");
   if(tbody){
     tbody.innerHTML = "";
     const frag = document.createDocumentFragment();
-    // 歷史模式：用「截至該日為止」的 IC（公正評估）
+    // 歷史模式：用「截至該日為止」的 IC（公正評估，無 look-ahead）
     const histICs = calcAllFactorICs(S.enriched.slice(0, idx+1), ext, 120);
+    const histRawICs = S._lastRawICs || {};
     [...factors].sort((a,b)=>b.w-a.w).forEach(f=>{
       const tr = document.createElement("tr");
       const cls = f.sig>.15?"c-red":f.sig<-.15?"c-green":"c-muted";
       const arrow = f.sig>.15?"▲ 偏多":f.sig<-.15?"▼ 偏空":"─ 中性";
       const ic = sn(histICs[f.name],0), icAbs = Math.abs(ic);
+      const icRaw = sn(histRawICs[f.name],0);
       const icCls = icAbs>0.10?"c-red":icAbs>0.05?"c-yellow":"c-muted";
-      tr.innerHTML = `<td>${FACTOR_LABELS[f.name]||f.name}</td><td class="${cls}">${arrow}</td><td style="font-family:var(--mono)">${(f.w*100).toFixed(1)}%</td><td class="${icCls}" style="font-family:var(--mono);text-align:right">${ic.toFixed(3)}</td>`;
+      const showRaw = Math.abs(icRaw-ic)>0.02;
+      const icText = showRaw ? `${ic.toFixed(2)} (${icRaw.toFixed(2)})` : ic.toFixed(2);
+      tr.innerHTML = `<td>${FACTOR_LABELS[f.name]||f.name}</td><td class="${cls}">${arrow}</td><td style="font-family:var(--mono)">${(f.w*100).toFixed(1)}%</td><td class="${icCls}" style="font-family:var(--mono);text-align:right;font-size:9px">${icText}</td>`;
       frag.appendChild(tr);
     });
     tbody.appendChild(frag);
@@ -3912,7 +3953,7 @@ async function runSelftest(silent=false){
     p && Number.isFinite(p.score) && Number.isFinite(p.confidence) ? ok("predictNext 完整路徑可執行", `score=${p.score.toFixed(3)} conf=${p.confidence.toFixed(0)}%`) : fail("predictNext 路徑異常", JSON.stringify(p));
   }catch(e){fail("predictNext 路徑",e.message);}
 
-  // ── 4h. IC 計算正確性 ──
+  // ── 4h. IC 計算正確性 + Bayesian Shrinkage ──
   try{
     const trendRows=Array.from({length:100},(_,i)=>{
       const base=100+i*0.6, vol=1+Math.sin(i*0.5)*0.3;
@@ -3920,11 +3961,16 @@ async function runSelftest(silent=false){
     });
     const enr=enrichRows(trendRows);
     const ics=calcAllFactorICs(enr,{},50);
-    // 合理檢查：所有 IC 在 [-1,1] 範圍，且至少有一個因子有 |IC|>0.05（證明計算非全零）
     const allFinite = Object.values(ics).every(v => Number.isFinite(v) && v>=-1 && v<=1);
     allFinite ? ok("IC 值域有限 [-1,1]") : fail("IC 越界 / NaN", JSON.stringify(ics));
-    const hasNonZero = Object.values(ics).some(v => Math.abs(v) > 0.05);
-    hasNonZero ? ok("IC 計算非全零（至少一因子有效）", `max |IC|=${Math.max(...Object.values(ics).map(Math.abs)).toFixed(3)}`) : fail("IC 全部接近 0", JSON.stringify(ics));
+    // 驗證 Bayesian shrinkage 生效：原始 IC > 收縮後 IC（絕對值）
+    const rawICs = S._lastRawICs || {};
+    let shrinkageWorking = false;
+    for (const k of Object.keys(ics)) {
+      const ic = sn(ics[k], 0), raw = sn(rawICs[k], 0);
+      if (Math.abs(raw) > 0.01 && Math.abs(ic) < Math.abs(raw)) { shrinkageWorking = true; break; }
+    }
+    shrinkageWorking ? ok("Bayesian Shrinkage 生效", `樣本 ${S._lastICSampleN}, 收縮 ${(S._lastShrinkFactor*100).toFixed(0)}%`) : fail("Shrinkage 未生效");
   }catch(e){fail("IC 計算",e.message);}
 
   // ── 4c. ATR Position Sizing 數學 ──
@@ -4057,14 +4103,14 @@ window.QDP={
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
   recalibrate:recalibrateIC,
   ics:()=>S._lastICs||{},
-  version:"3.12-pattern-filtered"    // + K 線型態納入多空判斷（candleRev/chartPattern 因子）+ UI 白名單常見型態
+  version:"3.13-shrinkage"           // + Bayesian Shrinkage IC（消除小樣本雜訊）+ 因子表顯示校準樣本量
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.12 初始化完成（K 線型態納入多空評分 + UI 只顯示常見型態）。");
+    appendLog("QDP PRO v3.13 初始化完成（Bayesian Shrinkage IC + 樣本量透明化）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
