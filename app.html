@@ -2206,6 +2206,101 @@ function renderPrediction(){
   tbody.appendChild(frag);
 }
 
+/* ════════════════════════════════════════════════════════════
+   歷史快照模式（Crosshair 懸停過去 K 棒時）
+   ────────────────────────────────────────────────────────────
+   同步以下面板到滑鼠所在那一天的狀態：
+     • OHLC strip + 量
+     • MA5/20/60/120 + VWAP
+     • Tech strip：ATR / RSI / BB% / DIF / DEA / MACD / K / D / J / VWAP
+     • 多因子訊號表（按該日訊號重排）
+     • 預測分數、信心度、EV、TP1/TP2、SL、漲跌機率
+   不同步：左側即時看板（永遠顯示「現在」）、回測、籌碼、AI（meta 統計）
+   設計重點：權重沿用當前 cached 權重避免每次 hover 重算（效能）。
+═══════════════════════════════════════════════════════════════ */
+let _inHistoryMode = false;
+function _exitHistoryMode(){
+  if(!_inHistoryMode) return;
+  _inHistoryMode = false;
+  renderOhlc();           // 恢復現價的 OHLC + tech strip
+  renderPrediction();     // 恢復現價的預測 / 因子表 / 機率
+}
+function renderHistoricalSnapshot(timeStr){
+  const idx = S.enriched.findIndex(r => r.time === timeStr);
+  if(idx < 0) return;
+  const r = S.enriched[idx];
+  _inHistoryMode = true;
+
+  // ── OHLC + 上方 MA / VWAP 條 ──
+  $t("oO",fp(r.open)); $t("oH",fp(r.high)); $t("oL",fp(r.low));
+  $t("oC",fp(r.close)); $st("oC","color",r.close>=r.open?"var(--red)":"var(--green)");
+  $t("oV",fv(r.volume));
+  $t("oM5",fp(r.ma5)); $t("oM20",fp(r.ma20)); $t("oM60",fp(r.ma60));
+  $t("oM120",fp(r.ma120)); $t("oVWAP",fp(r.vwap));
+
+  // ── Tech strip（下方） ──
+  $t("fATR",fp(r.atr)); $t("fRSI",fp(r.rsi)); $t("fBB",fp(r.bbPct));
+  $t("fDIF",fp(r.dif)); $t("fDEA",fp(r.dea)); $t("fHist",fp(r.hist));
+  $t("fK",fp(r.k)); $t("fD",fp(r.d)); $t("fJ",fp(r.j));
+  $t("fVWAP",fp(r.vwap));
+
+  // ── 重算該日多因子訊號 ──
+  // 用當前 cached 權重（避免 hover 時重算 adaptiveWeights，效能優先）
+  // ext 用當前籌碼 / 大盤資料 — 真實的歷史 ext 沒儲存，用近似
+  const weights = S.pred?.weights || BASE_W;
+  const ext = {
+    chipNet: 0, marginDelta: 0, shortRatio: 0,
+    foreignStreak: 0, trustStreak: 0, dealerStreak: 0,
+    relReturn5: calcRelReturn(S.enriched.slice(0, idx+1), S.twiiRows, 5)
+  };
+  const sig = factorSignalsAt(S.enriched, idx, ext);
+  const factors = Object.keys(weights).map(name => ({name, sig: sig[name]||0, w: weights[name]}));
+  const score = factors.reduce((a,f)=>a+f.sig*f.w, 0);
+  const atr = Math.max(0.01, sn(r.atr, r.close*0.02));
+  const evClose = r.close + score*atr*(0.55+Math.abs(score)*1.35);
+  const evOpen = r.close + (evClose-r.close)*0.32;
+
+  // ── 預測面板（標記為歷史快照）──
+  const dir = score>0.08?"偏多":score<-0.08?"偏空":"中性";
+  $t("pred-badge", `📅 ${r.time} ${dir} ${score.toFixed(3)}`);
+  $cls("pred-badge", "sec-badge t-yellow");                  // 黃色 = 歷史快照（區別於即時模式）
+  $t("pOpen",fp(evOpen));
+  $t("pClose",fp(evClose));
+  $t("pTp1",fp(r.close + 1.5*atr));
+  $t("pTp2",fp(r.close + 3.0*atr));
+  $t("pSl", fp(r.close - 1.5*atr));
+
+  // 信心度（沿用機構級公式）
+  const consensus = Math.abs(
+    factors.filter(f=>f.sig>.15).reduce((a,f)=>a+f.w,0) -
+    factors.filter(f=>f.sig<-.15).reduce((a,f)=>a+f.w,0)
+  );
+  const scoreConf = 100*(1-Math.exp(-3.5*Math.abs(score)));
+  const conf = clamp(40 + scoreConf*0.45 + consensus*25, 35, 95);
+  $t("pConf", conf.toFixed(0)+"%");
+
+  const pUp = clamp(Math.round(50+score*42), 5, 90);
+  const pDn = clamp(Math.round(50-score*42), 5, 90);
+  $t("prob-text", `漲${pUp}% / 平${clamp(100-pUp-pDn,0,60)}% / 跌${pDn}%`);
+  $st("prob-fill","width",pUp+"%");
+  $t("lastScore", (score>=0?"+":"")+score.toFixed(3));
+
+  // ── 因子表（依該日訊號重排） ──
+  const tbody = $.real("factor-rows");
+  if(tbody){
+    tbody.innerHTML = "";
+    const frag = document.createDocumentFragment();
+    [...factors].sort((a,b)=>b.w-a.w).forEach(f=>{
+      const tr = document.createElement("tr");
+      const cls = f.sig>.15?"c-red":f.sig<-.15?"c-green":"c-muted";
+      const arrow = f.sig>.15?"▲ 偏多":f.sig<-.15?"▼ 偏空":"─ 中性";
+      tr.innerHTML = `<td>${FACTOR_LABELS[f.name]||f.name}</td><td class="${cls}">${arrow}</td><td style="font-family:var(--mono)">${(f.w*100).toFixed(1)}%</td>`;
+      frag.appendChild(tr);
+    });
+    tbody.appendChild(frag);
+  }
+}
+
 function renderChips(){
   const c=S.chips,m=S.margin;
   const streakLabel=(n)=>{ const a=Math.abs(n); if(a===0) return ""; return ` (連${n>0?"買":"賣"}${a})`; };
@@ -2401,19 +2496,14 @@ function buildCharts(){
     });
   });
 
-  // Crosshair: 懸停時即時更新 OHLC 條，離開時恢復最新 bar
+  // Crosshair: 完整歷史快照模式 — 懸停過去日期時同步全部指標 / 因子 / 預測；離開恢復最新
   S.charts.c1.subscribeCrosshairMove(param=>{
-    if(!param.time||!param.seriesData||param.seriesData.size===0){renderOhlc();return;}
-    const c=param.seriesData.get(S.series.candle);
-    if(!c) return;
-    $("oO").textContent=fp(c.open);$("oH").textContent=fp(c.high);$("oL").textContent=fp(c.low);
-    const cEl=$("oC");cEl.textContent=fp(c.close);cEl.style.color=c.close>=c.open?"var(--red)":"var(--green)";
-    const vs=param.seriesData.get(S.series.vol);if(vs)$("oV").textContent=fv(vs.value);
-    const m5s=param.seriesData.get(S.series.ma5);if(m5s)$("oM5").textContent=fp(m5s.value);
-    const m20s=param.seriesData.get(S.series.ma20);if(m20s)$("oM20").textContent=fp(m20s.value);
-    const m60s=param.seriesData.get(S.series.ma60);if(m60s)$("oM60").textContent=fp(m60s.value);
-    const m120s=param.seriesData.get(S.series.ma120);if(m120s)$("oM120").textContent=fp(m120s.value);
-    const vws=param.seriesData.get(S.series.vwap);if(vws)$("oVWAP").textContent=fp(vws.value);
+    if(!param.time||!param.seriesData||param.seriesData.size===0){
+      // 離開圖表 → 恢復「即時模式」
+      _exitHistoryMode();
+      return;
+    }
+    renderHistoricalSnapshot(param.time);
   });
 
   S.resizeObs=new ResizeObserver(()=>{
@@ -3259,6 +3349,12 @@ async function runSelftest(silent=false){
     Math.abs(rr-0.0681)<0.005 ? ok("calcRelReturn 正確", `relReturn5=${(rr*100).toFixed(2)}%`) : fail("calcRelReturn", `rr=${rr}`);
   }catch(e){fail("calcRelReturn",e.message);}
 
+  // ── 4g. 歷史快照模式 ──
+  try{
+    typeof renderHistoricalSnapshot==="function" && typeof _exitHistoryMode==="function"
+      ? ok("歷史快照模式函數已定義") : fail("歷史快照函數缺失");
+  }catch(e){fail("歷史快照",e.message);}
+
   // ── 4f. 搜尋建議排序 ──
   try{
     // 確認 _scoreMatch 排序符合預期：完全相同 > 前綴 > 子字串
@@ -3362,14 +3458,14 @@ window.QDP={
   selftest:runSelftest,
   state:()=>S,
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
-  version:"3.5-search-autocomplete" // + 搜尋建議（代號/名稱混合 + 最近查詢）+ R:R 1:2 + 趨勢過濾
+  version:"3.6-historical-crosshair" // + Crosshair 完整歷史快照 + 搜尋建議 + R:R 1:2 + 趨勢過濾
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.5 初始化完成（+ 搜尋建議 + R:R 1:2 + 趨勢過濾 + 多時框 + ATR sizing）。");
+    appendLog("QDP PRO v3.6 初始化完成（+ Crosshair 歷史快照 + 搜尋建議 + R:R 1:2 + 多時框）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
