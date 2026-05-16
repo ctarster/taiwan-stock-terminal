@@ -430,7 +430,7 @@ button,input,select{font:inherit}
           </div>
           <div style="padding:0 10px 8px">
             <table class="tbl">
-              <thead><tr><th>因子</th><th>訊號</th><th>自適應權重</th></tr></thead>
+              <thead><tr><th>因子</th><th>訊號</th><th>權重</th><th title="Information Coefficient — 訊號與隔日報酬的 Pearson 相關性。|IC|>0.10 屬機構級單因子預測力">IC</th></tr></thead>
               <tbody id="factor-rows"></tbody>
             </table>
           </div>
@@ -1508,46 +1508,140 @@ function factorSignalsAt(rows,i,ext={}){
 
   return sig;
 }
-/* adaptiveWeights — 機構級因子權重校準
- *   修正點 (vs v3.1)：
- *   1. **消除 look-ahead bias**：訊號用 rows[i]（已知 t 收盤），目標報酬用 rows[i+1]-rows[i]；
- *      迭代範圍 i ∈ [start, end-1]，end = rows.length-1（最末根尚無「下一根」可比）。
- *      舊版 end=rows.length-2 已避免，但訊號生成路徑也須確保 factorSignalsAt 不偷看未來——
- *      本實作 factorSignalsAt(rows,i,ext) 只讀 rows[i] 與 rows[i-1]，不含未來，
- *      所以 bias 來自「校準後的權重又被同一段訓練資料當回測」——拆出 trainEnd 隔離。
- *   2. **加入 LRU 快取**：盤中 tick 階段不重新校準權重（同一支股票 + 同樣 rows.length → 直接命中）。
+/* ════════════════════════════════════════════════════════════
+   IC-Based Weighting（v3.8 升級）
+   ────────────────────────────────────────────────────────────
+   原 adaptiveWeights 用啟發式 +1/-0.25 規則，傾向獎勵「常發訊號」的因子
+   → 罕見但精準的反向因子（如 exhaustion）被稀釋。
+   IC framework（AQR / Two Sigma 標準做法）：
+     IC = Pearson correlation(factor_sig_t, return_{t+1})
+     weight = BASE_W × (1 + |IC| × AMP)
+   不論因子發訊頻率，只看訊號與隔日報酬的真實相關性。
+═══════════════════════════════════════════════════════════════ */
+
+/* calcAllFactorICs — 對所有因子計算 IC（一次走過 rows，效能 O(n×k)） */
+function calcAllFactorICs(rows, ext={}, lookback=120){
+  const names=Object.keys(BASE_W);
+  const out={}; names.forEach(k=>out[k]=0);
+  const n=rows.length;
+  if(n<30) return out;
+  const start=Math.max(40, n-lookback-1);
+  const end=n-1;
+  if(end<=start+10) return out;
+
+  // 收集訊號與隔日報酬序列
+  const sigsArr={}; names.forEach(k=>sigsArr[k]=[]);
+  const rets=[];
+  for(let i=start;i<end;i++){
+    const sig=factorSignalsAt(rows,i,ext);
+    const ret=sn(rows[i+1].close)-sn(rows[i].close);
+    if(!Number.isFinite(ret)) continue;
+    rets.push(ret);
+    names.forEach(k=>sigsArr[k].push(sn(sig[k],0)));
+  }
+  if(rets.length<20) return out;
+
+  // Pearson correlation：先算 return 的均值與離差平方和
+  const mean=arr=>arr.reduce((a,b)=>a+b,0)/arr.length;
+  const mr=mean(rets);
+  let dR=0; for(const r of rets) dR+=(r-mr)*(r-mr);
+  if(dR<=0) return out;
+
+  names.forEach(k=>{
+    const arr=sigsArr[k];
+    const ms=mean(arr);
+    let num=0, dS=0;
+    for(let i=0;i<arr.length;i++){
+      const xs=arr[i]-ms;
+      num += xs * (rets[i]-mr);
+      dS  += xs*xs;
+    }
+    const denom=Math.sqrt(dS*dR);
+    out[k] = denom>0 ? num/denom : 0;
+  });
+  return out;
+}
+
+/* adaptiveWeights — IC-based 權重計算
+ *   公式：w_i = BASE_W_i × (1 + |IC_i| × AMP)，正規化使 Σw = 1
+ *   AMP = 8：|IC|=0.05 → 1.4x 放大；|IC|=0.15 → 2.2x；|IC|=0.25 → 3x
+ *   保留 BASE_W 作為先驗（domain knowledge），IC 作為證據加權
+ *   look-ahead 消除：訊號用 rows[i]，目標報酬用 rows[i+1] - rows[i]；末根不參與校準
+ *   結果存於 S._lastICs 供 UI 透明化顯示（讓使用者看到每個因子實際的預測力）
  */
 function adaptiveWeights(rows,ext={},lookback=120){
   const names=Object.keys(BASE_W);
-  const scoreMap={}; names.forEach(n=>scoreMap[n]=1);
   const n=rows.length;
-  if(n<3) { const w={}; let tot=0; names.forEach(k=>{w[k]=BASE_W[k];tot+=w[k];}); names.forEach(k=>w[k]/=tot); return w; }
-  const start=Math.max(40,n-lookback-1);
-  const end=n-1;                       // i 走到 end-1，i+1 = end（最末根）
-  for(let i=start;i<end;i++){
-    const s=factorSignalsAt(rows,i,ext);
-    const nextRet=sn(rows[i+1].close)-sn(rows[i].close);
-    const ns=sign(nextRet); if(ns===0) continue;
-    names.forEach(name=>{
-      const sg=sign(s[name]);
-      if(sg===ns) scoreMap[name]+=1;
-      else if(sg!==0) scoreMap[name]-=.25;
-      scoreMap[name]+=Math.abs(s[name])*.03;
-    });
+  // 樣本太少 → 回傳純 BASE_W（domain prior）
+  if(n<30){
+    const w={}; let tot=0;
+    names.forEach(k=>{w[k]=BASE_W[k]; tot+=w[k];});
+    names.forEach(k=>w[k]/=tot);
+    return w;
   }
+  const ics=calcAllFactorICs(rows,ext,lookback);
+  const AMP=8;        // IC 放大係數（典型 |IC| 0.05~0.25，AMP=8 給予 1.4~3x 範圍）
   const w={}; let tot=0;
-  names.forEach(name=>{ w[name]=Math.max(.04,BASE_W[name]*Math.max(.35,scoreMap[name])); tot+=w[name]; });
-  names.forEach(name=>w[name]/=tot);
+  names.forEach(k=>{
+    const absIC=Math.abs(sn(ics[k],0));
+    w[k]=Math.max(0.02, BASE_W[k] * (1 + absIC*AMP));
+    tot+=w[k];
+  });
+  names.forEach(k=>w[k]/=tot);
+  // 暴露 ICs 供 UI 顯示（透明度：使用者能看到模型「相信」哪些因子）
+  try{ S._lastICs=ics; }catch{}
   return w;
 }
-/* 快取版本：盤中 tick 重複呼叫只在 row 長度變化 / 籌碼變化時重算 */
+/* adaptiveWeightsCached — 在記憶體 + localStorage 雙層快取
+ *   記憶體（session）：盤中 tick 直接命中，無延遲
+ *   localStorage：跨日 reload 後沿用昨日校準（除非樣本長度變化大或超過 7 天）
+ *   持久化讓「模型自我適應」可以累積 — 非揮發、每日盤後自動更新 */
+const STORE_IC = "qdp38_ic_weights";
+function _getStoredIC(stockId, tf){
+  try{
+    const all=JSON.parse(localStorage.getItem(STORE_IC)||"{}");
+    return all[`${stockId}|${tf}`];
+  }catch{return null;}
+}
+function _setStoredIC(stockId, tf, payload){
+  try{
+    const all=JSON.parse(localStorage.getItem(STORE_IC)||"{}");
+    all[`${stockId}|${tf}`]=payload;
+    localStorage.setItem(STORE_IC, JSON.stringify(all));
+  }catch{}
+}
 function adaptiveWeightsCached(rows,ext={},lookback=120){
   const key=`${S.stockId}|${S.timeframe}|${rows.length}|${sn(ext.chipNet,0)|0}|${sn(ext.marginDelta,0)|0}`;
   const c=S.weightsCache;
   if(c&&c.key===key) return c.weights;
+
+  // 嘗試命中 localStorage（rows.length ±3 內視為相同，避免每天重算）
+  const stored=_getStoredIC(S.stockId, S.timeframe);
+  if(stored && stored.weights && Math.abs(stored.rowsLen-rows.length)<=3
+            && Date.now()-stored.ts < 7*24*3600*1000){
+    S.weightsCache={key, weights:stored.weights};
+    if(stored.ics) S._lastICs=stored.ics;
+    return stored.weights;
+  }
+
   const weights=adaptiveWeights(rows,ext,lookback);
   S.weightsCache={key,weights};
+  // 持久化（含 ICs 供 UI 顯示）
+  _setStoredIC(S.stockId, S.timeframe, {
+    weights, ics:S._lastICs||{}, rowsLen:rows.length, ts:Date.now()
+  });
   return weights;
+}
+/* 強制重新校準（用於設定變更 / 手動觸發） */
+function _purgeICCache(){
+  try{ localStorage.removeItem(STORE_IC); }catch{}
+  S.weightsCache=null; S._lastICs=null;
+}
+/* 對外接口：重新校準當前股票，並重新跑全部分析 */
+function recalibrateIC(){
+  _purgeICCache();
+  toast("IC 已重置，重新校準中…","ok");
+  if(S.rawRows.length) applyTimeframe(false);
 }
 function predictNext(rows,livePrice,ext={}){
   if(!rows.length) return null;
@@ -2262,11 +2356,17 @@ function renderPrediction(){
   }
   const tbody=$("factor-rows");tbody.innerHTML="";
   const frag=document.createDocumentFragment();
+  const ics=S._lastICs||{};
   [...p.factors].sort((a,b)=>b.w-a.w).forEach(f=>{
     const tr=document.createElement("tr");
     const cls=f.sig>.15?"c-red":f.sig<-.15?"c-green":"c-muted";
     const arrow=f.sig>.15?"▲ 偏多":f.sig<-.15?"▼ 偏空":"─ 中性";
-    tr.innerHTML=`<td>${FACTOR_LABELS[f.name]||f.name}</td><td class="${cls}">${arrow}</td><td style="font-family:var(--mono)">${(f.w*100).toFixed(1)}%</td>`;
+    const ic=sn(ics[f.name],0);
+    // IC 顏色：|IC|>0.10 機構級綠、0.05-0.10 黃、<0.05 灰
+    const icAbs=Math.abs(ic);
+    const icCls = icAbs>0.10?"c-red":icAbs>0.05?"c-yellow":"c-muted";
+    const icText = ic.toFixed(3);
+    tr.innerHTML=`<td>${FACTOR_LABELS[f.name]||f.name}</td><td class="${cls}">${arrow}</td><td style="font-family:var(--mono)">${(f.w*100).toFixed(1)}%</td><td class="${icCls}" style="font-family:var(--mono);text-align:right">${icText}</td>`;
     frag.appendChild(tr);
   });
   tbody.appendChild(frag);
@@ -2380,16 +2480,20 @@ function renderHistoricalSnapshot(timeStr){
   $st("prob-fill","width",pUp+"%");
   $t("lastScore", (score>=0?"+":"")+score.toFixed(3));
 
-  // ── 因子表（依該日訊號重排） ──
+  // ── 因子表（依該日訊號重排）+ IC 欄 ──
   const tbody = $.real("factor-rows");
   if(tbody){
     tbody.innerHTML = "";
     const frag = document.createDocumentFragment();
+    // 歷史模式：用「截至該日為止」的 IC（公正評估）
+    const histICs = calcAllFactorICs(S.enriched.slice(0, idx+1), ext, 120);
     [...factors].sort((a,b)=>b.w-a.w).forEach(f=>{
       const tr = document.createElement("tr");
       const cls = f.sig>.15?"c-red":f.sig<-.15?"c-green":"c-muted";
       const arrow = f.sig>.15?"▲ 偏多":f.sig<-.15?"▼ 偏空":"─ 中性";
-      tr.innerHTML = `<td>${FACTOR_LABELS[f.name]||f.name}</td><td class="${cls}">${arrow}</td><td style="font-family:var(--mono)">${(f.w*100).toFixed(1)}%</td>`;
+      const ic = sn(histICs[f.name],0), icAbs = Math.abs(ic);
+      const icCls = icAbs>0.10?"c-red":icAbs>0.05?"c-yellow":"c-muted";
+      tr.innerHTML = `<td>${FACTOR_LABELS[f.name]||f.name}</td><td class="${cls}">${arrow}</td><td style="font-family:var(--mono)">${(f.w*100).toFixed(1)}%</td><td class="${icCls}" style="font-family:var(--mono);text-align:right">${ic.toFixed(3)}</td>`;
       frag.appendChild(tr);
     });
     tbody.appendChild(frag);
@@ -3438,6 +3542,22 @@ async function runSelftest(silent=false){
     overrideScore < -0.4 ? ok("Regime Override 頂部翻轉", `+0.5 trend → ${overrideScore.toFixed(3)}`) : fail("Regime Override", `${overrideScore}`);
   }catch(e){fail("新因子訊號",e.message);}
 
+  // ── 4h. IC 計算正確性 ──
+  try{
+    // 100 根強上升資料，MACD/MA 等趨勢因子的 IC 應為正
+    const trendRows=Array.from({length:100},(_,i)=>{
+      const base=100+i*0.6, vol=1+Math.sin(i*0.5)*0.3;
+      return {time:`2024-${String(Math.floor(i/30)+1).padStart(2,"0")}-${String((i%30)+1).padStart(2,"0")}`,open:base,high:base+vol,low:base-vol*0.7,close:base+vol*0.3,volume:1000};
+    });
+    const enr=enrichRows(trendRows);
+    const ics=calcAllFactorICs(enr,{},50);
+    // 上升趨勢中，至少 MACD 或 MA 因子的 IC 應為正
+    (ics.macd>0.05 || ics.ma>0.05) ? ok("IC 計算捕捉趨勢", `MACD IC=${ics.macd.toFixed(3)} MA IC=${ics.ma.toFixed(3)}`) : fail("IC 未捕捉趨勢", JSON.stringify(ics));
+    // 所有 IC 應在 [-1, 1] 範圍
+    const validRange = Object.values(ics).every(v => v>=-1 && v<=1);
+    validRange ? ok("IC 值域 [-1,1]") : fail("IC 越界", JSON.stringify(ics));
+  }catch(e){fail("IC 計算",e.message);}
+
   // ── 4c. ATR Position Sizing 數學 ──
   try{
     const stopDist=2.0;             // 假設停損距離 NT$ 2/股
@@ -3566,14 +3686,16 @@ window.QDP={
   selftest:runSelftest,
   state:()=>S,
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
-  version:"3.8-regime-override"      // + Regime Override（exhaustion 不被權重稀釋）+ 趨勢衰竭 + 歷史模式
+  recalibrate:recalibrateIC,
+  ics:()=>S._lastICs||{},
+  version:"3.9-ic-adaptive"          // + IC-based 因子權重（AQR/TwoSigma 框架）+ 持久化校準 + Regime Override
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.8 初始化完成（+ Regime Override：頂底反轉警示優先權）。");
+    appendLog("QDP PRO v3.9 初始化完成（+ IC-based 自適應權重 + 持久化校準）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
