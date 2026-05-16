@@ -676,6 +676,15 @@ button,input,select{font:inherit}
           <div class="hint">最大可承受虧損 = 資金 × 此比例</div>
         </div>
       </div>
+      <div class="fg" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line1)">
+        <label style="color:var(--yellow)">📦 資料備份 / 還原（跨電腦遷移用）</label>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button class="tb-btn" id="exportDataBtn" style="flex:1">📥 匯出全部資料</button>
+          <button class="tb-btn" id="importDataBtn" style="flex:1">📤 匯入備份</button>
+          <input type="file" id="importDataFile" accept=".json,application/json" style="display:none">
+        </div>
+        <div class="hint">包含：自選清單、警報、預測歷史（archive）、IC 校準權重、設定。<br>建議：每月匯出一次存到雲端硬碟，換電腦/重灌可完整還原。</div>
+      </div>
     </div>
     <div class="sp-footer">
       <button class="tb-btn primary" style="flex:1" id="saveCfgBtn">儲存設定</button>
@@ -3653,6 +3662,84 @@ function selectSuggest(id){
   loadStock(id);
 }
 
+/* ════════════════════════════════════════════════════════════
+   資料備份 / 還原（跨電腦遷移用）
+   ────────────────────────────────────────────────────────────
+   匯出：收集所有 qdp* 開頭的 localStorage key，打包成 JSON 檔下載
+   匯入：讀取 JSON 檔，還原所有 key，重整頁面
+   檔名格式：qdp_backup_YYYYMMDD_HHmm.json
+   驗證：匯入時檢查格式 + 顯示將還原的 key 數量供使用者確認
+═══════════════════════════════════════════════════════════════ */
+function exportAllData(){
+  const dump = {
+    __qdpVersion: "3.13",
+    __exportedAt: new Date().toISOString(),
+    __exportedFrom: location.href,
+    data: {}
+  };
+  let count = 0;
+  for(let i=0; i<localStorage.length; i++){
+    const k = localStorage.key(i);
+    if(k && k.startsWith("qdp")){
+      dump.data[k] = localStorage.getItem(k);
+      count++;
+    }
+  }
+  if(count===0){ toast("沒有資料可匯出","err"); return; }
+  // 統計 archive 筆數供使用者確認
+  let archiveCount=0;
+  try{
+    const pred=JSON.parse(dump.data["qdp31_pred"]||"{}");
+    for(const k in pred) archiveCount+=(pred[k]||[]).length;
+  }catch{}
+  const blob = new Blob([JSON.stringify(dump,null,2)],{type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const now = new Date();
+  const fname = `qdp_backup_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}_${String(now.getHours()).padStart(2,"0")}${String(now.getMinutes()).padStart(2,"0")}.json`;
+  a.href=url; a.download=fname; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  toast(`✓ 已匯出 ${count} 個 key、${archiveCount} 筆預測歷史`,"ok");
+  appendLog(`匯出備份：${fname}（${count} keys、${archiveCount} archive 筆數）`);
+}
+
+function importAllData(file){
+  if(!file){ toast("未選擇檔案","err"); return; }
+  const reader = new FileReader();
+  reader.onload = e => {
+    try{
+      const parsed = JSON.parse(e.target.result);
+      if(!parsed.data || typeof parsed.data!=="object"){
+        toast("檔案格式錯誤（非 QDP 備份）","err"); return;
+      }
+      const keys = Object.keys(parsed.data).filter(k=>k.startsWith("qdp"));
+      if(!keys.length){ toast("備份內無 QDP 資料","err"); return; }
+      let archiveCount=0;
+      try{
+        const pred=JSON.parse(parsed.data["qdp31_pred"]||"{}");
+        for(const k in pred) archiveCount+=(pred[k]||[]).length;
+      }catch{}
+      const exportedAt = parsed.__exportedAt ? new Date(parsed.__exportedAt).toLocaleString("zh-TW") : "未知時間";
+      const ok = confirm(
+        `將還原 ${keys.length} 個資料 key（${archiveCount} 筆預測歷史）\n` +
+        `備份時間：${exportedAt}\n\n` +
+        `⚠️ 這會覆蓋當前所有 QDP 資料！\n確定繼續？`
+      );
+      if(!ok){ toast("取消匯入","ok"); return; }
+      // 還原
+      keys.forEach(k => localStorage.setItem(k, parsed.data[k]));
+      toast(`✓ 已還原 ${keys.length} 個 key，3 秒後重整…`,"ok");
+      appendLog(`匯入備份完成：${keys.length} keys、${archiveCount} archive 筆數`);
+      setTimeout(()=>location.reload(),3000);
+    }catch(err){
+      toast("讀取失敗："+err.message,"err");
+      console.error("[QDP][import]",err);
+    }
+  };
+  reader.onerror = ()=>toast("檔案讀取錯誤","err");
+  reader.readAsText(file);
+}
+
 /* ── 事件 ── */
 function bindEvents(){
   $("settingsBtn").addEventListener("click",e=>{e.stopPropagation();openSettings();});
@@ -3660,6 +3747,15 @@ function bindEvents(){
   $("cancelCfgBtn").addEventListener("click",closeSettings);
   $("saveCfgBtn").addEventListener("click",saveSettings);
   $("overlay").addEventListener("click",e=>{if(e.target===$("overlay"))closeSettings();});
+
+  // 資料備份 / 還原
+  $("exportDataBtn").addEventListener("click", exportAllData);
+  $("importDataBtn").addEventListener("click", ()=>$("importDataFile").click());
+  $("importDataFile").addEventListener("change", e=>{
+    const f = e.target.files?.[0];
+    if(f) importAllData(f);
+    e.target.value = "";   // 清掉，允許再選同一個檔案
+  });
 
   document.querySelectorAll(".tf-btn").forEach(b=>{
     b.addEventListener("click",()=>{
@@ -4053,6 +4149,7 @@ async function runSelftest(silent=false){
     "watchList","wlInput","wlAddBtn","wlRefreshBtn","wl-count",
     "fetch-dot","fetch-label","log-body","log-count",
     "fmToken","groqKey","btBars","rtSec","saveCfgBtn","cancelCfgBtn","closeSettingsBtn","settingsBtn","overlay",
+    "exportDataBtn","importDataBtn","importDataFile",
     "vol-bars-wrap","mini-chart","chart-loader",
     "c1","c2","c3","c4"
   ];
@@ -4103,14 +4200,16 @@ window.QDP={
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
   recalibrate:recalibrateIC,
   ics:()=>S._lastICs||{},
-  version:"3.13-shrinkage"           // + Bayesian Shrinkage IC（消除小樣本雜訊）+ 因子表顯示校準樣本量
+  exportData:exportAllData,
+  importData:()=>$("importDataFile").click(),
+  version:"3.14-portable"            // + 資料匯出 / 匯入（換電腦遷移）+ Bayesian Shrinkage IC
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.13 初始化完成（Bayesian Shrinkage IC + 樣本量透明化）。");
+    appendLog("QDP PRO v3.14 初始化完成（+ 資料匯出 / 匯入，換電腦無痛遷移）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
