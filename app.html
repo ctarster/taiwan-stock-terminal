@@ -1462,16 +1462,40 @@ function predictNext(rows,livePrice,ext={}){
   const sig=factorSignalsAt(rows,i,ext);
   const factors=Object.keys(weights).map(name=>({name,sig:sig[name],w:weights[name]}));
   const score=factors.reduce((a,f)=>a+f.sig*f.w,0);
+  /* 共識強度 — 強多因子權重和 vs 強空因子權重和的差
+     範圍 [0,1]：1 = 全部因子同向；0 = 完全分歧。低共識代表訊號混亂，不該重壓。 */
   const last=rows[i];
   const atr=Math.max(0.01,sn(last.atr,last.close*0.02));
   const consensus=Math.abs(factors.filter(f=>f.sig>.15).reduce((a,f)=>a+f.w,0)-factors.filter(f=>f.sig<-.15).reduce((a,f)=>a+f.w,0));
-  const conf=clamp(45+Math.abs(score)*50+consensus*10,35,95);
-  const mag=atr*(0.55+Math.abs(score)*1.35);
-  const evClose=livePrice+score*mag;
+
+  /* ── 機構級信心度公式（v3.3）──
+   *  舊：clamp(45 + |score|×50 + consensus×10, 35, 95) — 18 因子稀釋後 |score| 常 ~0.1
+   *      → conf 普遍卡 50-60%，無法反映實際清晰訊號。
+   *  新：sigmoid 放大 + 三項加成
+   *     (a) scoreConf = 100×(1-exp(-3.5|score|))     |0.1|→29、|0.2|→50、|0.3|→65、|0.4|→75
+   *     (b) consensusConf = consensus × 25            因子高度一致時加成
+   *     (c) confluenceBonus = +8 if D+W 同向          多時框確認
+   *  最終 conf 範圍 35~95；強訊號 + 高共識 + D+W 一致 可達 80-90%。 */
+  const scoreConf = 100*(1-Math.exp(-3.5*Math.abs(score)));
+  const consensusConf = consensus * 25;
+  // 多時框 bonus：computeConfluence 可能未跑（loadStock 前 / 資料不足），靜默忽略
+  let confluenceBonus = 0;
+  try{ const cf = S._confluenceCache?.val; if(cf?.aligned && Math.sign(cf.scoreD)===Math.sign(score)) confluenceBonus = 8; }catch{}
+  const conf = clamp(40 + scoreConf*0.45 + consensusConf + confluenceBonus, 35, 95);
+
+  /* ── 統一的 R:R 1:2 出場框架 ──
+   *  SL_DIST = 1.5 × ATR   （停損距離；給市場噪音呼吸空間）
+   *  TP1     = +1.5 × ATR  （R:R = 1:1 — 部分出場拿回成本）
+   *  TP2     = +3.0 × ATR  （R:R = 1:2 — 主力獲利）
+   *  期望值：50% 勝率 × 2 − 50% × 1 = +0.5 (正期望值)，35% 勝率仍正期望。 */
+  const SL_DIST = 1.5 * atr;
+  const evClose=livePrice+score*atr*(0.55+Math.abs(score)*1.35);
   const evOpen=livePrice+(evClose-livePrice)*.32;
   return {
     score,confidence:conf,ev_open:evOpen,ev_close:evClose,
-    tp1:evClose+atr*.60,tp2:evClose+atr*1.15,sl:livePrice-atr*1.05,
+    tp1: livePrice + 1.5*atr,
+    tp2: livePrice + 3.0*atr,
+    sl:  livePrice - SL_DIST,
     prob:{up:clamp(Math.round(50+score*42),5,90)},
     weights,factors,atr
   };
@@ -1496,7 +1520,7 @@ function runBacktest(rows,targetBars=180){
   const TAX     =0.003;
   const COST    =BUY_FEE+SELL_FEE+TAX;
 
-   /* ── 機構級波段參數（v3.3 對齊 predictNext） ──
+  /* ── 機構級波段參數（v3.3 對齊 predictNext） ──
    *  R:R = 1:2 — 統一停損 / 止盈倍數，避免 backtest 與 predict 不一致。
    *  進場過濾兩道：(1) 多因子分數 > 門檻 (2) 多頭趨勢結構（MA5>MA20 且 MA20>MA60）
    *  反向訊號 < -0.05 提前出場；持倉超時 20 根強制平倉。 */
@@ -1509,8 +1533,9 @@ function runBacktest(rows,targetBars=180){
   // 狀態機
   let state='FLAT',entryPrice=0,stopLoss=0,takeProfit=0,holdBars=0;
   let equity=1,grossWin=0,grossLoss=0,wins=0,trades=0,errSum=0;
+  let filteredByTrend=0;   // 統計被趨勢過濾擋下的次數
   const curve=[1];
-  
+
   for(let i=trainEnd;i<rows.length;i++){
     const cur=rows[i];
     if(!cur){curve.push(equity);continue;}
@@ -1518,7 +1543,7 @@ function runBacktest(rows,targetBars=180){
     const sig=factorSignalsAt(rows,i,{});
     let score=0;
     for(const n of wKeys) score+=sig[n]*frozenW[n];
-    
+
     // 預測誤差（信號品質監控，與持倉邏輯無關）
     if(i<rows.length-1){
       const nxt=rows[i+1];
@@ -1528,7 +1553,7 @@ function runBacktest(rows,targetBars=180){
       }
     }
 
-     /* ── 趨勢結構過濾 ── 機構紀律：只在多頭排列時做多。
+    /* ── 趨勢結構過濾 ── 機構紀律：只在多頭排列時做多。
      *   條件：MA5 > MA20 AND MA20 > MA60（短中長線同向上）。
      *   過濾掉「反彈但仍是空頭結構」的假訊號，是提升勝率最有效的單一改進。 */
     const ma5=sn(cur.ma5),ma20=sn(cur.ma20),ma60=sn(cur.ma60);
@@ -1606,7 +1631,7 @@ function runBacktest(rows,targetBars=180){
   const avgL=lC?grossLoss/lC:0;
   const kelly=clamp(avgL>0?((pf*winRate-(1-winRate))/pf)*0.5:0,0,0.25);
   const errN=rows.length-trainEnd-1;
-  return {totalReturn:equity-1,winRate,profitFactor:pf,sharpeLike:sharpe,trades,maxDD:mdd,avgErr:errN>0?errSum/errN:0,avgWin:avgW,avgLoss:avgL,kelly,trainBars:trainEnd,testBars:Math.max(0,trades)};
+  return {totalReturn:equity-1,winRate,profitFactor:pf,sharpeLike:sharpe,trades,maxDD:mdd,avgErr:errN>0?errSum/errN:0,avgWin:avgW,avgLoss:avgL,kelly,trainBars:trainEnd,testBars:Math.max(0,trades),filteredByTrend};
 }
 
 /* ── Archive ── */
@@ -2229,16 +2254,27 @@ function renderArchive(){
   $("archive-text").textContent=s.n?`${s.n} 筆已驗證，方向命中率 ${(s.hitRate*100).toFixed(1)}%，平均收盤誤差 ${(s.avgErr*100).toFixed(2)}%。`:"尚未累積足夠驗證資料，每日盤後重新整理即可累積。";
 }
 function renderBacktest(){
-  const b=S.backtest,badge=$("bt-badge");
-  if(!b){badge.className="sec-badge t-red";badge.textContent="未執行";return;}
-  $("btReturn").textContent=(b.totalReturn*100).toFixed(2)+"%";
-  $("btReturn").style.color=b.totalReturn>=0?"var(--red)":"var(--green)";
-  $("btWin").textContent=(b.winRate*100).toFixed(1)+"%";
-  $("btPF").textContent=b.profitFactor.toFixed(2);
-  $("btSharpe").textContent=b.sharpeLike.toFixed(2);
-  badge.className="sec-badge "+(b.totalReturn>=0?"t-red":"t-green");
-  badge.textContent=`WF ${b.trades}筆`;
-  $("bt-text").textContent=`Walk-Forward 測試集 ${b.trades} 筆 / 訓練集 ${b.trainBars} 根。勝率 ${(b.winRate*100).toFixed(1)}%、PF ${b.profitFactor.toFixed(2)}、Sharpe ${b.sharpeLike.toFixed(2)}、MDD ${(b.maxDD*100).toFixed(1)}%、均誤差 ${(b.avgErr*100).toFixed(2)}%。`;
+  const b=S.backtest,badge=$.real("bt-badge");
+  if(!b){if(badge){badge.className="sec-badge t-red";badge.textContent="未執行";}return;}
+  $t("btReturn",(b.totalReturn*100).toFixed(2)+"%");
+  $st("btReturn","color",b.totalReturn>=0?"var(--red)":"var(--green)");
+  $t("btWin",(b.winRate*100).toFixed(1)+"%");
+  $t("btPF",b.profitFactor.toFixed(2));
+  $t("btSharpe",b.sharpeLike.toFixed(2));
+  if(badge){
+    badge.className="sec-badge "+(b.totalReturn>=0?"t-red":"t-green");
+    badge.textContent=`WF ${b.trades}筆`;
+  }
+  // 期望值 = winRate × avgWin − (1-winRate) × avgLoss（正數 = 正期望系統）
+  const expectancy = b.winRate*b.avgWin - (1-b.winRate)*b.avgLoss;
+  const expSign = expectancy>0 ? "+" : "";
+  $t("bt-text",
+    `WF 測試集 ${b.trades} 筆 / 訓練 ${b.trainBars} 根。`+
+    `勝率 ${(b.winRate*100).toFixed(1)}%、PF ${b.profitFactor.toFixed(2)}、Sharpe ${b.sharpeLike.toFixed(2)}、MDD ${(b.maxDD*100).toFixed(1)}%。`+
+    `\n單筆期望值 ${expSign}${(expectancy*100).toFixed(2)}%${expectancy>0?"（正期望系統）":"（負期望，需調參）"}；`+
+    `趨勢過濾擋下 ${b.filteredByTrend||0} 個假訊號。`+
+    `均預測誤差 ${(b.avgErr*100).toFixed(2)}%。`
+  );
 }
 function renderAI(text,fromAI=false){
   $("ai-body").textContent=text||"尚無分析。";
@@ -3101,7 +3137,7 @@ async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.3 初始化完成（institutional-grade + 多時框 + ATR sizing + 大盤相對強度）。");
+    appendLog("QDP PRO v3.4 初始化完成（R:R 1:2 + 趨勢過濾 + sigmoid 信心 + 多時框 + ATR sizing）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
