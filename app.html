@@ -1458,6 +1458,22 @@ const PATTERN_NAMES = {
   headShoulders:"頭肩頂", invHeadShoulders:"頭肩底"
 };
 
+/* UI 顯示白名單 — 只顯示「教科書級命名 + 訊號明確」的常見型態
+ *   排除：doji（太頻繁、訊號弱）、longBody（不算 pattern）、單獨 gap、
+ *         hangingMan / invertedHammer（爭議性高）、harami（訊號弱）、
+ *         doubleTop/BottomForming（未確認）
+ *   保留：所有強訊號型態（吞噬、晨星夜星、紅三兵、頭肩、確認雙頂/底等）
+ *   注意：型態仍**全部**參與多因子分數計算（candleRev / chartPattern）—— 只過濾顯示。 */
+const PATTERN_DISPLAY_WHITELIST = new Set([
+  "hammer", "shootingStar",                                    // 經典單 K
+  "bullEngulfing", "bearEngulfing",                            // 經典雙 K
+  "darkCloud", "piercing",                                     // 反轉雙 K
+  "morningStar", "eveningStar",                                // 最強三 K
+  "threeWhiteSoldiers", "threeBlackCrows",                     // 連續三 K
+  "doubleTop", "doubleBottom",                                 // 已確認圖形
+  "headShoulders", "invHeadShoulders"                          // 已確認頭肩
+]);
+
 function _candleParts(r){
   const range=sn(r.high)-sn(r.low);
   const body=Math.abs(sn(r.close)-sn(r.open));
@@ -1624,9 +1640,10 @@ function _detectChartPatterns(rows,i,atr){
   return out;
 }
 
-/* 主入口：偵測所有型態並聚合成兩個因子訊號 */
+/* 主入口：偵測所有型態並聚合成兩個因子訊號
+   守門：只擋 rows[i] 缺失；各 sub-detector 自己處理需要的最小 lookback */
 function detectAllPatterns(rows,i){
-  if(i<5 || !rows[i]) return {patterns:{}, candleRev:0, chartPattern:0};
+  if(!rows[i] || i<1) return {patterns:{}, candleRev:0, chartPattern:0};
   const atr=Math.max(0.01, sn(rows[i].atr, sn(rows[i].close)*0.02));
   const patterns={
     ..._detectSingleBar(rows,i,atr),
@@ -2606,12 +2623,13 @@ function renderPrediction(){
   $st("prob-fill","width",pUp+"%");
   $t("lastScore",(p.score>=0?"+":"")+p.score.toFixed(3));
 
-  // ── K 線 / 圖形型態顯示 ──
+  // ── K 線 / 圖形型態顯示（只顯示白名單常見型態）──
   const lastR = S.enriched[S.enriched.length-1];
   if(lastR && lastR.patterns){
     const detected = Object.entries(lastR.patterns)
-      .filter(([k,v])=>Math.abs(v)>0.1)
-      .sort((a,b)=>Math.abs(b[1])-Math.abs(a[1]));
+      .filter(([k,v]) => PATTERN_DISPLAY_WHITELIST.has(k) && Math.abs(v)>0.1)
+      .sort((a,b) => Math.abs(b[1])-Math.abs(a[1]))
+      .slice(0,3);   // 最多顯示 3 個最強訊號，避免畫面過長
     if(detected.length){
       const names = detected.map(([k,v])=>{
         const name = PATTERN_NAMES[k] || k;
@@ -2620,7 +2638,7 @@ function renderPrediction(){
       }).join("、");
       $t("pattern-detail", `K線型態：${names}`);
     } else {
-      $t("pattern-detail", "K線型態：無顯著訊號");
+      $t("pattern-detail", "K線型態：無常見型態");
     }
   } else {
     $t("pattern-detail", "K線型態：—");
@@ -2755,11 +2773,12 @@ function renderHistoricalSnapshot(timeStr){
   $t("pTp2",fp(r.close + 3.0*atr));
   $t("pSl", fp(r.close - 1.5*atr));
 
-  // ── 歷史模式型態顯示（該日 K 線 / 圖形型態） ──
+  // ── 歷史模式型態顯示（只顯示白名單）──
   if(r.patterns){
     const detected = Object.entries(r.patterns)
-      .filter(([k,v])=>Math.abs(v)>0.1)
-      .sort((a,b)=>Math.abs(b[1])-Math.abs(a[1]));
+      .filter(([k,v]) => PATTERN_DISPLAY_WHITELIST.has(k) && Math.abs(v)>0.1)
+      .sort((a,b) => Math.abs(b[1])-Math.abs(a[1]))
+      .slice(0,3);
     if(detected.length){
       const names = detected.map(([k,v])=>{
         const nm = PATTERN_NAMES[k]||k;
@@ -2767,7 +2786,7 @@ function renderHistoricalSnapshot(timeStr){
       }).join("、");
       $t("pattern-detail", `K線型態（${r.time}）：${names}`);
     } else {
-      $t("pattern-detail", `K線型態（${r.time}）：無顯著訊號`);
+      $t("pattern-detail", `K線型態（${r.time}）：無常見型態`);
     }
   }
 
@@ -3850,24 +3869,33 @@ async function runSelftest(silent=false){
 
   // ── 4j. K 線型態識別 ──
   try{
-    // 模擬「多頭吞噬」：前一根空（open 100, close 95），今根多（open 94 close 102）
-    const fakeBars=[
-      {time:"2024-01-01",open:110,high:111,low:99,close:100,volume:1000},
-      {time:"2024-01-02",open:100,high:101,low:94,close:95 ,volume:1000},   // 前根：大空
-      {time:"2024-01-03",open:94 ,high:103,low:93,close:102,volume:1000}    // 今根：大多 + 完全包覆
+    // 模擬「多頭吞噬」於下跌趨勢末端（需 5 根 history 給 trend 判斷）
+    const engBars=[
+      {time:"2024-01-01",open:120,high:121,low:118,close:118,volume:1000,atr:2},
+      {time:"2024-01-02",open:118,high:119,low:115,close:115,volume:1000,atr:2},
+      {time:"2024-01-03",open:115,high:116,low:112,close:112,volume:1000,atr:2},
+      {time:"2024-01-04",open:112,high:113,low:109,close:109,volume:1000,atr:2},
+      {time:"2024-01-05",open:109,high:110,low:105,close:105,volume:1000,atr:2},
+      {time:"2024-01-06",open:105,high:106,low:99 ,close:100,volume:1000,atr:2},  // 前根：大空 (body=5)
+      {time:"2024-01-07",open:99 ,high:108,low:98 ,close:107,volume:1000,atr:2}   // 今根：大多 (body=8) + 完全包覆
     ];
-    // 補上必要 atr 欄
-    fakeBars.forEach(b=>{b.atr=2; b.rsi=50; b.bbPct=50;});
-    const pp = detectAllPatterns(fakeBars, 2);
+    const pp = detectAllPatterns(engBars, 6);
     pp.patterns.bullEngulfing>0.5 ? ok("K線型態：多頭吞噬偵測", `sig=${pp.patterns.bullEngulfing}`) : fail("多頭吞噬偵測失敗", JSON.stringify(pp.patterns));
     pp.candleRev>0.3 ? ok("K線型態 candleRev 聚合正確", `score=${pp.candleRev.toFixed(2)}`) : fail("candleRev 聚合", `${pp.candleRev}`);
 
-    // 模擬「錘子線」在下跌趨勢末端
-    const downtrend=Array.from({length:7},(_,i)=>({time:`2024-02-${i+1}`,open:100-i,high:101-i,low:99-i,close:99.5-i,volume:1000,atr:2}));
-    // 末根：下影線長 + 實體小
-    downtrend.push({time:"2024-02-08",open:92,high:92.5,low:88,close:92.3,volume:1000,atr:2});
-    const ppH = detectAllPatterns(downtrend, downtrend.length-1);
-    ppH.patterns.hammer ? ok("K線型態：錘子線偵測", `sig=${ppH.patterns.hammer}`) : fail("錘子線偵測", JSON.stringify(ppH.patterns));
+    // 模擬「乾淨錘子線」於下跌趨勢末端：實體在頂、下影線長、無上影線
+    //   open=92.0、close=92.05（body=0.05）、high=92.05（upper=0）、low=88（lower=4）
+    const hamBars=[
+      {time:"2024-02-01",open:100,high:101,low:98 ,close:98 ,volume:1000,atr:2},
+      {time:"2024-02-02",open:98 ,high:99 ,low:96 ,close:96 ,volume:1000,atr:2},
+      {time:"2024-02-03",open:96 ,high:97 ,low:94 ,close:94 ,volume:1000,atr:2},
+      {time:"2024-02-04",open:94 ,high:95 ,low:92 ,close:92 ,volume:1000,atr:2},
+      {time:"2024-02-05",open:92 ,high:93 ,low:90 ,close:90 ,volume:1000,atr:2},
+      // 最末根：乾淨錘子（body=0.5 在頂、下影=2.5、上影≈0）
+      {time:"2024-02-06",open:90.0,high:90.5,low:87.5,close:90.5,volume:1000,atr:2}
+    ];
+    const ppH = detectAllPatterns(hamBars, hamBars.length-1);
+    ppH.patterns.hammer ? ok("K線型態：錘子線偵測", `sig=${ppH.patterns.hammer.toFixed(2)}`) : fail("錘子線偵測", JSON.stringify(ppH.patterns));
   }catch(e){fail("K線型態",e.message);}
 
   // ── 4i. predictNext 完整路徑 smoke test（捕捉 TDZ / undefined 變數 bug）──
@@ -4029,14 +4057,14 @@ window.QDP={
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
   recalibrate:recalibrateIC,
   ics:()=>S._lastICs||{},
-  version:"3.11-pattern-recognition" // + 22 個 K 線型態 + 圖形型態（雙頂底、頭肩）+ 趨勢力道感知 Override
+  version:"3.12-pattern-filtered"    // + K 線型態納入多空判斷（candleRev/chartPattern 因子）+ UI 白名單常見型態
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.11 初始化完成（+ 22 種 K 線型態識別 + 圖形型態自動偵測）。");
+    appendLog("QDP PRO v3.12 初始化完成（K 線型態納入多空評分 + UI 只顯示常見型態）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
