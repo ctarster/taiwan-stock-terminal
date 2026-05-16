@@ -422,7 +422,8 @@ button,input,select{font:inherit}
               <div class="box"><div class="lbl">停損</div><div class="val c-green" id="pSl">---</div></div>
               <div class="box"><div class="lbl">信心度</div><div class="val c-blue" id="pConf">---</div></div>
             </div>
-            <div id="confluence-detail" style="font-size:9px;color:var(--txt2);margin:0 0 6px;line-height:1.5">日線 vs 週線 訊號融合：載入中…</div>
+            <div id="confluence-detail" style="font-size:9px;color:var(--txt2);margin:0 0 4px;line-height:1.5">日線 vs 週線 訊號融合：載入中…</div>
+            <div id="pattern-detail" style="font-size:9px;color:var(--txt2);margin:0 0 6px;line-height:1.5">K線型態：—</div>
             <div style="font-size:9px;color:var(--txt2);margin-bottom:3px;display:flex;justify-content:space-between">
               <span>漲機率</span><span id="prob-text">---</span>
             </div>
@@ -755,11 +756,13 @@ const STORE = { cfg:"qdp31_cfg", watch:"qdp31_watch", alerts:"qdp31_alerts", pre
  *   exhaustion 在 RSI/BB/偏離 MA20 三重極值時給強反向訊號，平衡延續偏誤
  *   權重設高（0.11，全因子最高）— 因為極值反轉的歷史命中率優於單純趨勢追隨 */
 const BASE_W={
-  rsi:.06, macd:.08, kdj:.05, bb:.05, vol:.05, ma:.07, chip:.05, margin:.04,
-  adx:.05, obv:.05, stochRsi:.04, mfi:.05, mom20:.04, vwapDev:.04,
+  rsi:.05, macd:.07, kdj:.05, bb:.04, vol:.05, ma:.07, chip:.04, margin:.03,
+  adx:.05, obv:.04, stochRsi:.04, mfi:.04, mom20:.04, vwapDev:.04,
   revenue:.03, eps:.03,
-  relStr:.08, chipStreak:.07,
-  exhaustion:.11   // 新增：趨勢衰竭反向訊號（權重最高，因為頂底訊號最值錢）
+  relStr:.07, chipStreak:.06,
+  exhaustion:.10,    // 反向訊號核心
+  candleRev:.06,     // 新增：短期 K 線反轉型態
+  chartPattern:.05   // 新增：圖形型態（雙頂/底、頭肩等）
 };
 const FACTOR_LABELS={
   rsi:"RSI動能",     macd:"MACD趨勢",    kdj:"KDJ震盪",    bb:"布林位置",
@@ -767,7 +770,8 @@ const FACTOR_LABELS={
   adx:"ADX趨勢力",  obv:"OBV能量",      stochRsi:"隨機RSI", mfi:"資金流向",
   mom20:"20日動能",  vwapDev:"VWAP偏離", revenue:"月營收",  eps:"EPS趨勢",
   relStr:"大盤相對強度", chipStreak:"法人連續同向",
-  exhaustion:"趨勢衰竭反向"
+  exhaustion:"趨勢衰竭反向",
+  candleRev:"K線反轉型態", chartPattern:"圖形型態"
 };
 
 /* ─── 工具 ─── */
@@ -1286,7 +1290,8 @@ function enrichRows(rows){
     let s=0; for(let j=i-5;j<i;j++) s+=vols[j];
     vr[i]=s?vols[i]/(s/5):1;
   }
-  return rows.map((r,i)=>({
+  // 先建立基本 enriched（用於型態偵測需要的 atr 等）
+  const enriched=rows.map((r,i)=>({
     ...r,ma5:ma5[i],ma20:ma20[i],ma60:ma60[i],ma120:ma120[i],
     rsi:rsi[i],atr:atr[i],
     dif:macd.dif[i],dea:macd.dea[i],hist:macd.hist[i],
@@ -1294,6 +1299,14 @@ function enrichRows(rows){
     bbUpper:bbBands.upper[i],bbLower:bbBands.lower[i],bbMid:bbBands.mid[i],
     vwap:vwap[i],vr:vr[i]
   }));
+  // 第二輪：K 線型態 / 圖形型態（需先有 atr 才能標準化偵測閾值）
+  for(let i=0;i<enriched.length;i++){
+    const pp=detectAllPatterns(enriched,i);
+    enriched[i].patterns    = pp.patterns;
+    enriched[i].candleRev   = pp.candleRev;
+    enriched[i].chartPattern= pp.chartPattern;
+  }
+  return enriched;
 }
 
 /* enrichLastBar — 盤中 tick 增量更新最末根
@@ -1394,7 +1407,8 @@ function enrichLastBar(prevEnriched,rawRows){
   let vr=1;
   if(vols.length>5){let s=0;for(let j=vols.length-6;j<vols.length-1;j++) s+=vols[j]; vr=s?vols[vols.length-1]/(s/5):1;}
 
-  return {
+  // 構造帶完整指標的末根（型態偵測需要 atr）
+  const newLast = {
     ...r,
     ma5:ma5v,ma20:ma20v,ma60:ma60v,ma120:ma120New,
     rsi:rsiNew,atr:atrNew,
@@ -1404,8 +1418,239 @@ function enrichLastBar(prevEnriched,rawRows){
     bbUpper:bbBands.upper[lastIdx],bbLower:bbBands.lower[lastIdx],bbMid:bbBands.mid[lastIdx],
     vwap:vwapArr[lastIdx],vr
   };
+  // 型態偵測：用 prevEnriched 提供歷史 + newLast 當作末根
+  const ctx = isNewBar ? prevEnriched.concat([newLast]) : prevEnriched.slice(0,-1).concat([newLast]);
+  const pp = detectAllPatterns(ctx, ctx.length-1);
+  newLast.patterns    = pp.patterns;
+  newLast.candleRev   = pp.candleRev;
+  newLast.chartPattern= pp.chartPattern;
+  return newLast;
 }
 function _invalidateEnrichState(){ S._emaState=null; S._rsiState=null; S._atrState=null; }
+
+/* ════════════════════════════════════════════════════════════
+   K 線型態 / 圖形型態識別（v3.11）
+   ────────────────────────────────────────────────────────────
+   完整 22 個型態偵測：
+     單 K（6）：錘子、吊人、流星、倒槌、十字星、長實體
+     雙 K（6）：多頭/空頭吞噬、多頭/空頭孕線、烏雲蓋頂、穿頭破腳
+     三 K（4）：晨星、夜星、紅三兵、三隻烏鴉
+     缺口（2）：跳空向上、跳空向下
+     圖形（6）：雙頂、雙底、頭肩頂、頭肩底（含「形成中」狀態）
+   設計原則：
+     • 所有閾值以 ATR 標準化（避免大小盤股的尺度差）
+     • 上下文判斷（前 5 根趨勢方向）— 同樣 K 線在不同趨勢中意義相反
+     • 偵測結果儲存於 row.candleRev / row.chartPattern / row.patterns
+     • 在 enrichRows 預計算一次，避免 hover 時重算
+═══════════════════════════════════════════════════════════════ */
+
+const PATTERN_NAMES = {
+  hammer:"錘子線", hangingMan:"吊人線", shootingStar:"流星", invertedHammer:"倒槌",
+  doji:"十字星", longBody:"長實體",
+  bullEngulfing:"多頭吞噬", bearEngulfing:"空頭吞噬",
+  bullHarami:"多頭孕線", bearHarami:"空頭孕線",
+  darkCloud:"烏雲蓋頂", piercing:"穿頭破腳",
+  morningStar:"晨星", eveningStar:"夜星",
+  threeWhiteSoldiers:"紅三兵", threeBlackCrows:"三隻烏鴉",
+  gapUp:"跳空向上", gapDown:"跳空向下",
+  doubleTop:"雙頂跌破", doubleBottom:"雙底突破",
+  doubleTopForming:"雙頂形成中", doubleBottomForming:"雙底形成中",
+  headShoulders:"頭肩頂", invHeadShoulders:"頭肩底"
+};
+
+function _candleParts(r){
+  const range=sn(r.high)-sn(r.low);
+  const body=Math.abs(sn(r.close)-sn(r.open));
+  const upper=sn(r.high)-Math.max(sn(r.open),sn(r.close));
+  const lower=Math.min(sn(r.open),sn(r.close))-sn(r.low);
+  const isGreen=sn(r.close)>sn(r.open);
+  const isRed=sn(r.close)<sn(r.open);
+  return {range,body,upper,lower,isGreen,isRed};
+}
+
+function _detectSingleBar(rows,i,atr){
+  if(i<5) return {};
+  const r=rows[i],c=_candleParts(r);
+  if(c.range<atr*0.3) return {};        // K 棒太小，不可信
+  let prevSum=0;
+  for(let j=i-5;j<i;j++) prevSum+=sn(rows[j].close)-sn(rows[j].open);
+  const trend=prevSum>0?1:prevSum<0?-1:0;
+  const out={};
+  // Hammer（錘子）vs Hanging Man（吊人）— 同型不同位
+  if(c.lower>c.body*2 && c.upper<c.body*0.5 && c.body>0){
+    if(trend<0) out.hammer=0.6;
+    else if(trend>0) out.hangingMan=-0.5;
+  }
+  // Shooting Star（流星）vs Inverted Hammer（倒槌）— 同型不同位
+  if(c.upper>c.body*2 && c.lower<c.body*0.5 && c.body>0){
+    if(trend>0) out.shootingStar=-0.6;
+    else if(trend<0) out.invertedHammer=0.5;
+  }
+  // Doji（十字星）— 實體極小
+  if(c.body<c.range*0.1 && c.range>atr*0.5){
+    out.doji=trend>0?-0.4:trend<0?0.4:0;
+  }
+  // Long Body（長紅 / 長黑）— 實體 > 1.5 ATR
+  if(c.body>atr*1.5){
+    out.longBody=c.isGreen?0.4:-0.4;
+  }
+  return out;
+}
+
+function _detectTwoBar(rows,i,atr){
+  if(i<2) return {};
+  const p=rows[i-1],r=rows[i];
+  const cp=_candleParts(p),cr=_candleParts(r);
+  if(cr.range<atr*0.3) return {};
+  const out={};
+  // Bullish Engulfing — 前空今多 + 今實體完全包覆前實體
+  if(cp.isRed && cr.isGreen &&
+     sn(r.open)<sn(p.close) && sn(r.close)>sn(p.open) &&
+     cr.body>cp.body*1.1) out.bullEngulfing=0.8;
+  // Bearish Engulfing
+  if(cp.isGreen && cr.isRed &&
+     sn(r.open)>sn(p.close) && sn(r.close)<sn(p.open) &&
+     cr.body>cp.body*1.1) out.bearEngulfing=-0.8;
+  // Bullish Harami — 大空 + 小多包在內
+  if(cp.isRed && cr.isGreen && cp.body>atr &&
+     sn(r.open)>sn(p.close) && sn(r.close)<sn(p.open) &&
+     cr.body<cp.body*0.7) out.bullHarami=0.5;
+  // Bearish Harami
+  if(cp.isGreen && cr.isRed && cp.body>atr &&
+     sn(r.open)<sn(p.close) && sn(r.close)>sn(p.open) &&
+     cr.body<cp.body*0.7) out.bearHarami=-0.5;
+  // Dark Cloud Cover — 前大紅 + 今開高走低收破前中點
+  if(cp.isGreen && cr.isRed && cp.body>atr*0.8 &&
+     sn(r.open)>sn(p.high) && sn(r.close)<(sn(p.open)+sn(p.close))/2 &&
+     sn(r.close)>sn(p.open)) out.darkCloud=-0.7;
+  // Piercing Line — 對稱於 Dark Cloud
+  if(cp.isRed && cr.isGreen && cp.body>atr*0.8 &&
+     sn(r.open)<sn(p.low) && sn(r.close)>(sn(p.open)+sn(p.close))/2 &&
+     sn(r.close)<sn(p.open)) out.piercing=0.7;
+  return out;
+}
+
+function _detectThreeBar(rows,i,atr){
+  if(i<3) return {};
+  const p2=rows[i-2],p=rows[i-1],r=rows[i];
+  const c2=_candleParts(p2),cp=_candleParts(p),cr=_candleParts(r);
+  const out={};
+  // Morning Star — 大空 + 小實體（缺口下）+ 大紅（收回前一根中點以上）
+  if(c2.isRed && c2.body>atr*0.8 &&
+     cp.body<atr*0.5 &&
+     cr.isGreen && cr.body>atr*0.8 &&
+     Math.max(sn(p.open),sn(p.close))<sn(p2.close) &&
+     sn(r.close)>(sn(p2.open)+sn(p2.close))/2) out.morningStar=0.85;
+  // Evening Star — 對稱
+  if(c2.isGreen && c2.body>atr*0.8 &&
+     cp.body<atr*0.5 &&
+     cr.isRed && cr.body>atr*0.8 &&
+     Math.min(sn(p.open),sn(p.close))>sn(p2.close) &&
+     sn(r.close)<(sn(p2.open)+sn(p2.close))/2) out.eveningStar=-0.85;
+  // Three White Soldiers — 連三紅，依次創高 + 實體都夠大 + 開盤在前一根實體內
+  if(c2.isGreen && cp.isGreen && cr.isGreen &&
+     sn(p.close)>sn(p2.close) && sn(r.close)>sn(p.close) &&
+     sn(p.open)>sn(p2.open) && sn(p.open)<sn(p2.close) &&
+     sn(r.open)>sn(p.open) && sn(r.open)<sn(p.close) &&
+     c2.body>atr*0.5 && cp.body>atr*0.5 && cr.body>atr*0.5) out.threeWhiteSoldiers=0.7;
+  // Three Black Crows — 連三空
+  if(c2.isRed && cp.isRed && cr.isRed &&
+     sn(p.close)<sn(p2.close) && sn(r.close)<sn(p.close) &&
+     sn(p.open)<sn(p2.open) && sn(p.open)>sn(p2.close) &&
+     sn(r.open)<sn(p.open) && sn(r.open)>sn(p.close) &&
+     c2.body>atr*0.5 && cp.body>atr*0.5 && cr.body>atr*0.5) out.threeBlackCrows=-0.7;
+  return out;
+}
+
+function _detectGap(rows,i,atr){
+  if(i<1) return {};
+  const p=rows[i-1],r=rows[i];
+  const out={};
+  if(sn(r.low)>sn(p.high)+atr*0.3) out.gapUp=0.5;
+  if(sn(r.high)<sn(p.low)-atr*0.3) out.gapDown=-0.5;
+  return out;
+}
+
+/* 圖形型態（需 30+ 根 K 線）：雙頂/底、頭肩頂/底
+   思路：找近 25 根的 swing high / low（peak detection），再判斷幾何關係 */
+function _detectChartPatterns(rows,i,atr){
+  if(i<30) return {};
+  const lookback=25;
+  const seg=rows.slice(i-lookback,i+1);
+  const highs=[],lows=[];
+  for(let j=2;j<seg.length-2;j++){
+    const h=sn(seg[j].high),l=sn(seg[j].low);
+    if(h>sn(seg[j-1].high) && h>sn(seg[j-2].high) &&
+       h>sn(seg[j+1].high) && h>sn(seg[j+2].high)) highs.push({idx:j,price:h});
+    if(l<sn(seg[j-1].low) && l<sn(seg[j-2].low) &&
+       l<sn(seg[j+1].low) && l<sn(seg[j+2].low)) lows.push({idx:j,price:l});
+  }
+  const out={};
+  const lastClose=sn(rows[i].close);
+  // Double Top — 兩個高點接近、間距夠遠、中間有谷
+  if(highs.length>=2){
+    const h1=highs[highs.length-2],h2=highs[highs.length-1];
+    if(h2.idx-h1.idx>=5 && Math.abs(h1.price-h2.price)<atr*1.5){
+      const valley=Math.min(...seg.slice(h1.idx,h2.idx).map(x=>sn(x.low)));
+      if(valley<Math.min(h1.price,h2.price)-atr*1.5){
+        if(lastClose<valley) out.doubleTop=-0.8;
+        else out.doubleTopForming=-0.4;
+      }
+    }
+  }
+  // Double Bottom — 對稱
+  if(lows.length>=2){
+    const l1=lows[lows.length-2],l2=lows[lows.length-1];
+    if(l2.idx-l1.idx>=5 && Math.abs(l1.price-l2.price)<atr*1.5){
+      const peak=Math.max(...seg.slice(l1.idx,l2.idx).map(x=>sn(x.high)));
+      if(peak>Math.max(l1.price,l2.price)+atr*1.5){
+        if(lastClose>peak) out.doubleBottom=0.8;
+        else out.doubleBottomForming=0.4;
+      }
+    }
+  }
+  // Head & Shoulders — 三個高點，中間最高，兩肩約等高
+  if(highs.length>=3){
+    const a=highs[highs.length-3],h=highs[highs.length-2],b=highs[highs.length-1];
+    if(h.price>a.price+atr && h.price>b.price+atr &&
+       Math.abs(a.price-b.price)<atr*2) out.headShoulders=-0.85;
+  }
+  // Inverse Head & Shoulders
+  if(lows.length>=3){
+    const a=lows[lows.length-3],h=lows[lows.length-2],b=lows[lows.length-1];
+    if(h.price<a.price-atr && h.price<b.price-atr &&
+       Math.abs(a.price-b.price)<atr*2) out.invHeadShoulders=0.85;
+  }
+  return out;
+}
+
+/* 主入口：偵測所有型態並聚合成兩個因子訊號 */
+function detectAllPatterns(rows,i){
+  if(i<5 || !rows[i]) return {patterns:{}, candleRev:0, chartPattern:0};
+  const atr=Math.max(0.01, sn(rows[i].atr, sn(rows[i].close)*0.02));
+  const patterns={
+    ..._detectSingleBar(rows,i,atr),
+    ..._detectTwoBar(rows,i,atr),
+    ..._detectThreeBar(rows,i,atr),
+    ..._detectGap(rows,i,atr),
+    ..._detectChartPatterns(rows,i,atr)
+  };
+  // 聚合：candleRev = 短期 K 線；chartPattern = 圖形型態
+  const shortKeys=['hammer','hangingMan','shootingStar','invertedHammer','doji','longBody',
+                   'bullEngulfing','bearEngulfing','bullHarami','bearHarami','darkCloud','piercing',
+                   'morningStar','eveningStar','threeWhiteSoldiers','threeBlackCrows',
+                   'gapUp','gapDown'];
+  const longKeys=['doubleTop','doubleBottom','doubleTopForming','doubleBottomForming',
+                  'headShoulders','invHeadShoulders'];
+  let candleRev=0,chartPattern=0;
+  shortKeys.forEach(k=>candleRev+=sn(patterns[k],0));
+  longKeys.forEach(k=>chartPattern+=sn(patterns[k],0));
+  return {
+    patterns,
+    candleRev:clamp(candleRev,-1,1),
+    chartPattern:clamp(chartPattern,-1,1)
+  };
+}
 
 /* ═══════════ 因子訊號 ═══════════ */
 function factorSignalsAt(rows,i,ext={}){
@@ -1505,6 +1750,17 @@ function factorSignalsAt(rows,i,ext={}){
   if(Math.abs(tStr)>Math.abs(maxStr)) maxStr=tStr;
   if(Math.abs(dStr)>Math.abs(maxStr)) maxStr=dStr;
   sig.chipStreak=clamp(maxStr/5,-1,1);
+
+  /* K 線型態 / 圖形型態因子（v3.11）
+     若 row 已預計算（enrichRows 階段）直接讀；否則即時計算（罕見情境，fallback） */
+  if(Number.isFinite(r.candleRev) && Number.isFinite(r.chartPattern)){
+    sig.candleRev    = r.candleRev;
+    sig.chartPattern = r.chartPattern;
+  } else {
+    const pp = detectAllPatterns(rows, i);
+    sig.candleRev    = pp.candleRev;
+    sig.chartPattern = pp.chartPattern;
+  }
 
   return sig;
 }
@@ -2350,6 +2606,26 @@ function renderPrediction(){
   $st("prob-fill","width",pUp+"%");
   $t("lastScore",(p.score>=0?"+":"")+p.score.toFixed(3));
 
+  // ── K 線 / 圖形型態顯示 ──
+  const lastR = S.enriched[S.enriched.length-1];
+  if(lastR && lastR.patterns){
+    const detected = Object.entries(lastR.patterns)
+      .filter(([k,v])=>Math.abs(v)>0.1)
+      .sort((a,b)=>Math.abs(b[1])-Math.abs(a[1]));
+    if(detected.length){
+      const names = detected.map(([k,v])=>{
+        const name = PATTERN_NAMES[k] || k;
+        const tone = v>0 ? "🔴" : "🟢";   // 紅 = 多訊號（台股慣例）
+        return `${tone} ${name}`;
+      }).join("、");
+      $t("pattern-detail", `K線型態：${names}`);
+    } else {
+      $t("pattern-detail", "K線型態：無顯著訊號");
+    }
+  } else {
+    $t("pattern-detail", "K線型態：—");
+  }
+
   // ── 多時框 D+W 一致性 ──
   const cf=computeConfluence();
   if(cf){
@@ -2478,6 +2754,22 @@ function renderHistoricalSnapshot(timeStr){
   $t("pTp1",fp(r.close + 1.5*atr));
   $t("pTp2",fp(r.close + 3.0*atr));
   $t("pSl", fp(r.close - 1.5*atr));
+
+  // ── 歷史模式型態顯示（該日 K 線 / 圖形型態） ──
+  if(r.patterns){
+    const detected = Object.entries(r.patterns)
+      .filter(([k,v])=>Math.abs(v)>0.1)
+      .sort((a,b)=>Math.abs(b[1])-Math.abs(a[1]));
+    if(detected.length){
+      const names = detected.map(([k,v])=>{
+        const nm = PATTERN_NAMES[k]||k;
+        return `${v>0?"🔴":"🟢"} ${nm}`;
+      }).join("、");
+      $t("pattern-detail", `K線型態（${r.time}）：${names}`);
+    } else {
+      $t("pattern-detail", `K線型態（${r.time}）：無顯著訊號`);
+    }
+  }
 
   // 信心度（沿用機構級公式）
   const consensus = Math.abs(
@@ -3556,6 +3848,28 @@ async function runSelftest(silent=false){
     overrideScore < -0.4 ? ok("Regime Override 頂部翻轉", `+0.5 trend → ${overrideScore.toFixed(3)}`) : fail("Regime Override", `${overrideScore}`);
   }catch(e){fail("新因子訊號",e.message);}
 
+  // ── 4j. K 線型態識別 ──
+  try{
+    // 模擬「多頭吞噬」：前一根空（open 100, close 95），今根多（open 94 close 102）
+    const fakeBars=[
+      {time:"2024-01-01",open:110,high:111,low:99,close:100,volume:1000},
+      {time:"2024-01-02",open:100,high:101,low:94,close:95 ,volume:1000},   // 前根：大空
+      {time:"2024-01-03",open:94 ,high:103,low:93,close:102,volume:1000}    // 今根：大多 + 完全包覆
+    ];
+    // 補上必要 atr 欄
+    fakeBars.forEach(b=>{b.atr=2; b.rsi=50; b.bbPct=50;});
+    const pp = detectAllPatterns(fakeBars, 2);
+    pp.patterns.bullEngulfing>0.5 ? ok("K線型態：多頭吞噬偵測", `sig=${pp.patterns.bullEngulfing}`) : fail("多頭吞噬偵測失敗", JSON.stringify(pp.patterns));
+    pp.candleRev>0.3 ? ok("K線型態 candleRev 聚合正確", `score=${pp.candleRev.toFixed(2)}`) : fail("candleRev 聚合", `${pp.candleRev}`);
+
+    // 模擬「錘子線」在下跌趨勢末端
+    const downtrend=Array.from({length:7},(_,i)=>({time:`2024-02-${i+1}`,open:100-i,high:101-i,low:99-i,close:99.5-i,volume:1000,atr:2}));
+    // 末根：下影線長 + 實體小
+    downtrend.push({time:"2024-02-08",open:92,high:92.5,low:88,close:92.3,volume:1000,atr:2});
+    const ppH = detectAllPatterns(downtrend, downtrend.length-1);
+    ppH.patterns.hammer ? ok("K線型態：錘子線偵測", `sig=${ppH.patterns.hammer}`) : fail("錘子線偵測", JSON.stringify(ppH.patterns));
+  }catch(e){fail("K線型態",e.message);}
+
   // ── 4i. predictNext 完整路徑 smoke test（捕捉 TDZ / undefined 變數 bug）──
   try{
     const trendRows=Array.from({length:120},(_,i)=>{
@@ -3655,7 +3969,7 @@ async function runSelftest(silent=false){
     "pred-badge","pOpen","pClose","pTp1","pTp2","pSl","pConf","prob-text","lastScore",
     "chipForeign","chipTrust","chipDealer","chipTotal","chipDate","marginBal","marginChg","shortBal","shortRatio","chip-summary",
     "atrStop","maxDD","annVol","riskScore","risk-text","risk-badge","sizingLots","sizingMaxLoss","sizingSub",
-    "confluence-badge","confluence-detail",
+    "confluence-badge","confluence-detail","pattern-detail",
     "archive-badge","hitRate","avgErr","verifiedN","archive-text",
     "btReturn","btWin","btPF","btSharpe","bt-badge","bt-text",
     "capital","riskPct",
@@ -3715,14 +4029,14 @@ window.QDP={
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
   recalibrate:recalibrateIC,
   ics:()=>S._lastICs||{},
-  version:"3.10-trend-aware"         // + 趨勢力道感知 Regime Override（強趨勢中降低 override 強度，避免主升段提早出場）+ IC adaptive
+  version:"3.11-pattern-recognition" // + 22 個 K 線型態 + 圖形型態（雙頂底、頭肩）+ 趨勢力道感知 Override
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.10 初始化完成（+ 趨勢力道感知 Override + IC 自適應 + 反轉警示）。");
+    appendLog("QDP PRO v3.11 初始化完成（+ 22 種 K 線型態識別 + 圖形型態自動偵測）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
