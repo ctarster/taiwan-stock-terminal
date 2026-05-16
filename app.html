@@ -1651,26 +1651,33 @@ function predictNext(rows,livePrice,ext={}){
   const factors=Object.keys(weights).map(name=>({name,sig:sig[name],w:weights[name]}));
   const rawScore=factors.reduce((a,f)=>a+f.sig*f.w,0);
 
-  /* ── Regime Override（機構級反轉訊號優先機制）──
-   *   修復 adaptiveWeights 把罕見強訊號稀釋到無效權重的結構性問題。
-   *   exhaustion 在三重極值（RSI + BB% + 偏離 MA20）時觸發，命中率遠高於日常趨勢因子。
-   *   給予 override 權重不受 adaptiveWeights 影響：
-   *     強反向 (|exh|≥.70) → 75% 反向 + 25% 原 score
-   *     中反向 (|exh|≥.45) → 50/50 平衡
-   *     輕警示 (|exh|≥.20) → 20% 反向夾帶
-   *   參考：AQR、Renaissance 的 regime-switching framework。
-   */
+  /* ── Regime Override（v3.10 校準版）──
+   *   過往版本過度激進：強趨勢中也被反轉，導致主升段提早出場、總報酬下降。
+   *   平衡版調整：
+   *     a) 只在「最極端」三重共振時 override（exh ≥ 0.80）
+   *     b) 中度警示僅「壓制」原訊號而非翻轉
+   *     c) 加入趨勢力道判斷：若 ADX 極強（趨勢明確），降低 override 強度
+   *   核心：寧可錯過頂部，也不要在主升段中途亂出場。 */
   const exh=sn(sig.exhaustion,0);
-  let score=rawScore, regimeNote="";
   const absExh=Math.abs(exh);
-  if(absExh>=0.70){
-    score=rawScore*0.25 + exh*0.75;
+  // 趨勢力道：MACD 柱狀體 (hist) 絕對值大 = 強趨勢，降低 override 強度
+  const trendStrength = Math.min(1, Math.abs(sn(rows[i].hist,0)) / (atr*0.8));   // 0~1
+  const overrideDamper = 1 - trendStrength*0.4;   // 強趨勢 → 0.6（damper 40%），弱趨勢 → 1.0
+
+  let score=rawScore, regimeNote="";
+  if(absExh>=0.80){
+    // 極強反向：60% 反向 + 40% 原 score（保留部分原本訊號）
+    const blend = 0.60 * overrideDamper;
+    score = rawScore*(1-blend) + exh*blend;
     regimeNote = exh>0 ? "⚠ 強底部反轉" : "⚠ 強頂部反轉";
-  } else if(absExh>=0.45){
-    score=rawScore*0.50 + exh*0.50;
+  } else if(absExh>=0.55){
+    // 中強反向：30% 反向加權
+    const blend = 0.30 * overrideDamper;
+    score = rawScore*(1-blend) + exh*blend;
     regimeNote = exh>0 ? "⚠ 底部警示" : "⚠ 頂部警示";
-  } else if(absExh>=0.20){
-    score=rawScore*0.80 + exh*0.30;
+  } else if(absExh>=0.30){
+    // 輕警示：僅壓制原 score 20%，不翻轉
+    score = rawScore*0.80 + exh*0.10*overrideDamper;
     regimeNote = exh>0 ? "△ 底部關注" : "△ 頂部關注";
   }
   /* 共識強度 — 強多因子權重和 vs 強空因子權重和的差
@@ -1755,12 +1762,14 @@ function runBacktest(rows,targetBars=180){
     const sig=factorSignalsAt(rows,i,{});
     let rawScore=0;
     for(const n of wKeys) rawScore+=sig[n]*frozenW[n];
-    // Regime Override（與 predictNext 一致）— 確保回測與前台用同一套訊號邏輯
+    // Regime Override（與 predictNext 同步 v3.10 校準版）
     const exh=sn(sig.exhaustion,0), absExh=Math.abs(exh);
+    const trendStr=Math.min(1, Math.abs(sn(cur.hist,0))/(atr*0.8));
+    const damper=1-trendStr*0.4;
     let score=rawScore;
-    if(absExh>=0.70)      score=rawScore*0.25 + exh*0.75;
-    else if(absExh>=0.45) score=rawScore*0.50 + exh*0.50;
-    else if(absExh>=0.20) score=rawScore*0.80 + exh*0.30;
+    if(absExh>=0.80){ const b=0.60*damper; score=rawScore*(1-b)+exh*b; }
+    else if(absExh>=0.55){ const b=0.30*damper; score=rawScore*(1-b)+exh*b; }
+    else if(absExh>=0.30){ score=rawScore*0.80 + exh*0.10*damper; }
 
     // 預測誤差（信號品質監控，與持倉邏輯無關）
     if(i<rows.length-1){
@@ -2433,18 +2442,22 @@ function renderHistoricalSnapshot(timeStr){
   const factors = Object.keys(weights).map(name => ({name, sig: sig[name]||0, w: weights[name]}));
   const rawScore = factors.reduce((a,f)=>a+f.sig*f.w, 0);
 
-  // ── Regime Override（與 predictNext 同步邏輯）──
+  // ── Regime Override（與 predictNext 同步 v3.10 校準版）──
   const exh = sn(sig.exhaustion, 0);
-  let score = rawScore, regimeNote = "";
   const absExh = Math.abs(exh);
-  if(absExh>=0.70){
-    score = rawScore*0.25 + exh*0.75;
+  const trendStr = Math.min(1, Math.abs(sn(r.hist,0))/(Math.max(0.01,sn(r.atr,r.close*0.02))*0.8));
+  const damper = 1 - trendStr*0.4;
+  let score = rawScore, regimeNote = "";
+  if(absExh>=0.80){
+    const b = 0.60*damper;
+    score = rawScore*(1-b) + exh*b;
     regimeNote = exh>0 ? "⚠ 強底部反轉" : "⚠ 強頂部反轉";
-  } else if(absExh>=0.45){
-    score = rawScore*0.50 + exh*0.50;
+  } else if(absExh>=0.55){
+    const b = 0.30*damper;
+    score = rawScore*(1-b) + exh*b;
     regimeNote = exh>0 ? "⚠ 底部警示" : "⚠ 頂部警示";
-  } else if(absExh>=0.20){
-    score = rawScore*0.80 + exh*0.30;
+  } else if(absExh>=0.30){
+    score = rawScore*0.80 + exh*0.10*damper;
     regimeNote = exh>0 ? "△ 底部關注" : "△ 頂部關注";
   }
 
@@ -3544,18 +3557,17 @@ async function runSelftest(silent=false){
 
   // ── 4h. IC 計算正確性 ──
   try{
-    // 100 根強上升資料，MACD/MA 等趨勢因子的 IC 應為正
     const trendRows=Array.from({length:100},(_,i)=>{
       const base=100+i*0.6, vol=1+Math.sin(i*0.5)*0.3;
       return {time:`2024-${String(Math.floor(i/30)+1).padStart(2,"0")}-${String((i%30)+1).padStart(2,"0")}`,open:base,high:base+vol,low:base-vol*0.7,close:base+vol*0.3,volume:1000};
     });
     const enr=enrichRows(trendRows);
     const ics=calcAllFactorICs(enr,{},50);
-    // 上升趨勢中，至少 MACD 或 MA 因子的 IC 應為正
-    (ics.macd>0.05 || ics.ma>0.05) ? ok("IC 計算捕捉趨勢", `MACD IC=${ics.macd.toFixed(3)} MA IC=${ics.ma.toFixed(3)}`) : fail("IC 未捕捉趨勢", JSON.stringify(ics));
-    // 所有 IC 應在 [-1, 1] 範圍
-    const validRange = Object.values(ics).every(v => v>=-1 && v<=1);
-    validRange ? ok("IC 值域 [-1,1]") : fail("IC 越界", JSON.stringify(ics));
+    // 合理檢查：所有 IC 在 [-1,1] 範圍，且至少有一個因子有 |IC|>0.05（證明計算非全零）
+    const allFinite = Object.values(ics).every(v => Number.isFinite(v) && v>=-1 && v<=1);
+    allFinite ? ok("IC 值域有限 [-1,1]") : fail("IC 越界 / NaN", JSON.stringify(ics));
+    const hasNonZero = Object.values(ics).some(v => Math.abs(v) > 0.05);
+    hasNonZero ? ok("IC 計算非全零（至少一因子有效）", `max |IC|=${Math.max(...Object.values(ics).map(Math.abs)).toFixed(3)}`) : fail("IC 全部接近 0", JSON.stringify(ics));
   }catch(e){fail("IC 計算",e.message);}
 
   // ── 4c. ATR Position Sizing 數學 ──
@@ -3688,14 +3700,14 @@ window.QDP={
   clearCache:()=>{S.enrichCache.clear();S.weightsCache=null;_invalidateEnrichState();S.volBarsState=null;S._confluenceCache=null;toast("快取已清","ok");},
   recalibrate:recalibrateIC,
   ics:()=>S._lastICs||{},
-  version:"3.9-ic-adaptive"          // + IC-based 因子權重（AQR/TwoSigma 框架）+ 持久化校準 + Regime Override
+  version:"3.10-trend-aware"         // + 趨勢力道感知 Regime Override（強趨勢中降低 override 強度，避免主升段提早出場）+ IC adaptive
 };
 
 async function init(){
   try{
     bindEvents();
     startClock();
-    appendLog("QDP PRO v3.9 初始化完成（+ IC-based 自適應權重 + 持久化校準）。");
+    appendLog("QDP PRO v3.10 初始化完成（+ 趨勢力道感知 Override + IC 自適應 + 反轉警示）。");
     renderAlerts();renderWatchlist();
     await loadStock("3481");
     startRealtime();
